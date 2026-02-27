@@ -59,7 +59,7 @@ impl SimpleDmg<'_> {
     fn consume_16bit_direct(&mut self) -> Result<u16> {
         let nn_lsb = self.read_pc_inc()?;
         let nn_msb = self.read_pc_inc()?;
-        Ok(u16::from_le_bytes([nn_msb, nn_lsb]))
+        Ok(u16::from_le_bytes([nn_lsb, nn_msb]))
     }
 
     fn write(&mut self, address: u16, data: u8) -> Result<()> {
@@ -167,10 +167,10 @@ mod tests {
         init();
 
         let mut text = [
-            0x01, 0x12, 0x34, // LD BC,0x1234
-            0x11, 0x56, 0x78, // LD DE,0x5678
-            0x21, 0xde, 0xad, // LD HL,0xdead
-            0x31, 0xbe, 0xef, // LD SP,0xbeef
+            0x01, 0x34, 0x12, // LD BC,0x1234
+            0x11, 0x78, 0x56, // LD DE,0x5678
+            0x21, 0xad, 0xde, // LD HL,0xdead
+            0x31, 0xef, 0xbe, // LD SP,0xbeef
             0x10, // STOP
         ];
         let mut cpu = SimpleDmg {
@@ -190,7 +190,7 @@ mod tests {
         init();
 
         let mut text = [
-            0xfa, 0x00, 0x06, // LD A,(0x0006) = load 0xbe into A
+            0xfa, 0x06, 0x00, // LD A,(0x0006) = load 0xbe into A
             0x10, // STOP
             0xde, 0xad, 0xbe, 0xef, // data
         ];
@@ -210,8 +210,8 @@ mod tests {
 
         // Copy a single byte
         let mut text = [
-            0xfa, 0x00, 0x08, // LD A,(0x0008) = load 0x88 into A
-            0x01, 0x00, 0x09, // LD BC,0x09
+            0xfa, 0x08, 0x00, // LD A,(0x0008) = load 0x88 into A
+            0x01, 0x09, 0x00, // LD BC,0x09
             0x02, // LD (BC),A = write 0x88 to byte 9 (end)
             0x10, // STOP
             0x88, // source data
