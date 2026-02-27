@@ -48,7 +48,7 @@ impl SimpleDmg<'_> {
         // Increment after reading so that if the read fails, we have a correct
         // PC for debugging.
         let res = self.read(address);
-        self.rf.pc += 1;
+        self.rf.pc = self.rf.pc.wrapping_add(1);
         res
     }
 
@@ -111,29 +111,29 @@ impl SimpleDmg<'_> {
                 0x22 => {
                     trace!("LD (HL+), A");
                     self.write(self.rf.hl, self.rf.a)?;
-                    self.rf.hl += 1
+                    self.rf.hl = self.rf.hl.wrapping_add(1);
                 }
                 0x32 => {
                     trace!("LD (HL-), A");
                     self.write(self.rf.hl, self.rf.a)?;
-                    self.rf.hl -= 1
+                    self.rf.hl = self.rf.hl.wrapping_sub(1);
                 }
 
                 0x03 => {
                     trace!("INC BC");
-                    self.rf.bc += 1
+                    self.rf.bc = self.rf.bc.wrapping_add(1);
                 }
                 0x13 => {
                     trace!("INC DE");
-                    self.rf.de += 1
+                    self.rf.de = self.rf.de.wrapping_add(1);
                 }
                 0x23 => {
                     trace!("INC HL");
-                    self.rf.hl += 1
+                    self.rf.hl = self.rf.hl.wrapping_add(1);
                 }
                 0x33 => {
                     trace!("INC SP");
-                    self.rf.sp += 1
+                    self.rf.sp = self.rf.sp.wrapping_add(1);
                 }
 
                 0xfa => {
