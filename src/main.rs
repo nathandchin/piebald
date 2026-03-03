@@ -1,10 +1,39 @@
 #![allow(unused)]
 
+use std::{fs::File, io::Read};
+
+use clap::Parser;
 use eyre::{OptionExt, Result, eyre};
 use log::{debug, trace};
 
-fn main() {
-    todo!()
+#[derive(Parser, Debug)]
+struct Args {
+    boot_rom: String,
+    rom: String,
+}
+
+fn main() -> Result<()> {
+    env_logger::init();
+
+    let args = Args::parse();
+
+    let boot_rom = {
+        let mut buf = vec![];
+        if File::open(&args.boot_rom)?.read_to_end(&mut buf)? != 256 {
+            return Err(eyre!("Boot ROM must be 256 bytes"));
+        }
+        buf
+    };
+    dbg!(boot_rom.len());
+    let rom = {
+        let mut buf = vec![];
+        File::open(&args.rom)?.read_to_end(&mut buf)?;
+        buf
+    };
+
+    todo!();
+
+    Ok(())
 }
 
 #[derive(Default, Debug)]
@@ -31,12 +60,20 @@ struct RegisterFile {
 }
 
 #[derive(Debug)]
-struct SimpleDmg<'a> {
+struct SimpleDmg {
     rf: RegisterFile,
-    text: &'a mut [u8],
+    text: [u8; 0xffff],
 }
 
-impl SimpleDmg<'_> {
+impl SimpleDmg {
+    pub fn new(boot_rom: &[u8; 256]) -> Self {
+        let text = [0u8; 0xffff];
+        Self {
+            rf: RegisterFile::default(),
+            text,
+        }
+    }
+
     fn read(&self, address: u16) -> Result<u8> {
         self.text
             .get(address as usize)
@@ -162,20 +199,26 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
+    fn pad_zeroes(bytes: &[u8]) -> [u8; 0xffff] {
+        assert!(bytes.len() < 0xffff);
+        let mut res = [0; 0xffff];
+        res[..bytes.len()].copy_from_slice(&bytes);
+        res
+    }
+
     #[test]
     fn load_direct_16bit_immediate() {
         init();
 
-        let mut text = [
-            0x01, 0x34, 0x12, // LD BC,0x1234
-            0x11, 0x78, 0x56, // LD DE,0x5678
-            0x21, 0xad, 0xde, // LD HL,0xdead
-            0x31, 0xef, 0xbe, // LD SP,0xbeef
-            0x10, // STOP
-        ];
         let mut cpu = SimpleDmg {
             rf: RegisterFile::default(),
-            text: &mut text,
+            text: pad_zeroes(&[
+                0x01, 0x34, 0x12, // LD BC,0x1234
+                0x11, 0x78, 0x56, // LD DE,0x5678
+                0x21, 0xad, 0xde, // LD HL,0xdead
+                0x31, 0xef, 0xbe, // LD SP,0xbeef
+                0x10, // STOP
+            ]),
         };
         cpu.execute().unwrap();
         assert_eq!(cpu.rf.bc, 0x1234);
@@ -189,15 +232,13 @@ mod tests {
     fn load_accumulator_direct() {
         init();
 
-        let mut text = [
-            0xfa, 0x06, 0x00, // LD A,(0x0006) = load 0xbe into A
-            0x10, // STOP
-            0xde, 0xad, 0xbe, 0xef, // data
-        ];
-
         let mut cpu = SimpleDmg {
             rf: RegisterFile::default(),
-            text: &mut text,
+            text: pad_zeroes(&[
+                0xfa, 0x06, 0x00, // LD A,(0x0006) = load 0xbe into A
+                0x10, // STOP
+                0xde, 0xad, 0xbe, 0xef, // data
+            ]),
         };
         cpu.execute();
         assert_eq!(cpu.rf.a, 0xbe);
@@ -208,21 +249,20 @@ mod tests {
     fn load_indirect_8bit_a() {
         init();
 
-        // Copy a single byte
-        let mut text = [
-            0xfa, 0x08, 0x00, // LD A,(0x0008) = load 0x88 into A
-            0x01, 0x09, 0x00, // LD BC,0x09
-            0x02, // LD (BC),A = write 0x88 to byte 9 (end)
-            0x10, // STOP
-            0x88, // source data
-            0x00, // dest data
-        ];
         let mut cpu = SimpleDmg {
             rf: RegisterFile::default(),
-            text: &mut text,
+            text: pad_zeroes(&[
+                // Copy a single byte
+                0xfa, 0x08, 0x00, // LD A,(0x0008) = load 0x88 into A
+                0x01, 0x09, 0x00, // LD BC,0x09
+                0x02, // LD (BC),A = write 0x88 to byte 9 (end)
+                0x10, // STOP
+                0x88, // source data
+                0x00, // dest data
+            ]),
         };
         cpu.execute();
         assert_eq!(cpu.rf.pc, 8);
-        assert_eq!(text[8], text[9]);
+        assert_eq!(cpu.text[8], cpu.text[9]);
     }
 }
