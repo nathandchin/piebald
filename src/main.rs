@@ -17,23 +17,17 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let boot_rom = {
-        let mut buf = vec![];
-        if File::open(&args.boot_rom)?.read_to_end(&mut buf)? != 256 {
-            return Err(eyre!("Boot ROM must be 256 bytes"));
-        }
-        buf
-    };
-    dbg!(boot_rom.len());
+    let mut boot_rom = [0; 256];
+    File::open(&args.boot_rom)?.read_exact(&mut boot_rom);
+
     let rom = {
         let mut buf = vec![];
         File::open(&args.rom)?.read_to_end(&mut buf)?;
         buf
     };
 
-    todo!();
-
-    Ok(())
+    let mut dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
+    dmg.execute()
 }
 
 #[derive(Default, Debug)]
@@ -67,6 +61,10 @@ struct SimpleDmg<'rom> {
 }
 
 const RAM_START_ADDRESS: u16 = 0xc000;
+const FLAG_ZERO: u8 = 0x80;
+const FLAG_SUB: u8 = 0x40;
+const FLAG_HALF_CARRY: u8 = 0x20;
+const FLAG_CARRY: u8 = 0x10;
 
 impl<'rom> SimpleDmg<'rom> {
     pub fn new_with_bootrom(boot_rom: &'_ [u8; 256], rom: &'rom [u8]) -> Self {
@@ -74,7 +72,10 @@ impl<'rom> SimpleDmg<'rom> {
         ram[..256].clone_from_slice(boot_rom);
 
         Self {
-            rf: RegisterFile::default(),
+            rf: RegisterFile {
+                pc: RAM_START_ADDRESS,
+                ..RegisterFile::default()
+            },
             ram,
             rom,
         }
@@ -230,6 +231,12 @@ impl<'rom> SimpleDmg<'rom> {
                     self.rf.sp = self.rf.sp.wrapping_add(1);
                 }
 
+                0xaf => {
+                    trace!("XOR A,A");
+                    self.rf.a = 0;
+                    self.rf.f = 0 | if self.rf.a == 0 { FLAG_ZERO } else { 0 };
+                }
+
                 0xfa => {
                     trace!("LD A,(nn)");
                     let nn = self.consume_16bit_direct()?;
@@ -312,6 +319,31 @@ mod tests {
 
         cpu.execute();
         assert_eq!(cpu.rf.a, 0xbe);
+    }
+
+    #[test]
+    fn xor_a() {
+        init();
+
+        let mut ram = vec![0; 0xffff];
+        let code = [
+            0xaf, // XOR A
+            0x10, // STOP
+        ];
+        ram[0..code.len()].copy_from_slice(&code);
+
+        let mut cpu = SimpleDmg {
+            rf: RegisterFile {
+                a: 0xde,
+                pc: RAM_START_ADDRESS,
+                ..RegisterFile::default()
+            },
+            ram,
+            rom: &[],
+        };
+
+        cpu.execute();
+        assert_eq!(cpu.rf.a, 0)
     }
 
     #[test]
