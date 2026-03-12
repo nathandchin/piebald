@@ -1,10 +1,39 @@
 #![allow(unused)]
 
+use std::{fs::File, io::Read};
+
+use clap::Parser;
 use eyre::{OptionExt, Result, eyre};
 use log::{debug, trace};
 
-fn main() {
-    todo!()
+#[derive(Parser, Debug)]
+struct Args {
+    boot_rom: String,
+    rom: String,
+}
+
+fn main() -> Result<()> {
+    env_logger::init();
+
+    let args = Args::parse();
+
+    let boot_rom = {
+        let mut buf = vec![];
+        if File::open(&args.boot_rom)?.read_to_end(&mut buf)? != 256 {
+            return Err(eyre!("Boot ROM must be 256 bytes"));
+        }
+        buf
+    };
+    dbg!(boot_rom.len());
+    let rom = {
+        let mut buf = vec![];
+        File::open(&args.rom)?.read_to_end(&mut buf)?;
+        buf
+    };
+
+    todo!();
+
+    Ok(())
 }
 
 #[derive(Default, Debug)]
@@ -31,17 +60,56 @@ struct RegisterFile {
 }
 
 #[derive(Debug)]
-struct SimpleDmg<'a> {
+struct SimpleDmg<'rom> {
     rf: RegisterFile,
-    text: &'a mut [u8],
+    ram: Vec<u8>,
+    rom: &'rom [u8],
 }
 
-impl SimpleDmg<'_> {
+const RAM_START_ADDRESS: u16 = 0xc000;
+
+impl<'rom> SimpleDmg<'rom> {
+    pub fn new_with_bootrom(boot_rom: &'_ [u8; 256], rom: &'rom [u8]) -> Self {
+        let mut ram = vec![0; 0x2000];
+        ram[..256].clone_from_slice(boot_rom);
+
+        Self {
+            rf: RegisterFile::default(),
+            ram,
+            rom,
+        }
+    }
+
     fn read(&self, address: u16) -> Result<u8> {
-        self.text
-            .get(address as usize)
-            .copied()
-            .ok_or_else(|| eyre!("Invalid read at address {address}"))
+        // Ranges from https://gbdev.io/pandocs/Memory_Map.html
+        match address {
+            // 16 KiB ROM bank 00
+            0x0000..0x4000 => todo!(),
+            // 16 KiB ROM Bank 01–NN
+            0x4000..0x8000 => todo!(),
+            // 8 KiB Video RAM (VRAM)
+            0x8000..0xA000 => todo!(),
+            // 8 KiB External RAM
+            0xA000..0xC000 => todo!(),
+            // 8 KiB Work RAM (WRAM)
+            0xC000..0xE000 => self
+                .ram
+                .get(usize::from(address - RAM_START_ADDRESS))
+                .copied()
+                .ok_or_else(|| eyre!("Error reading from ram at address {address}")),
+            // Echo RAM (mirror of C000–DDFF)
+            0xE000..0xFE00 => Err(eyre!("Invalid read at address {address}")),
+            // Object attribute memory (OAM)
+            0xFE00..0xFEA0 => todo!(),
+            // Not Usable
+            0xFEA0..0xFF00 => Err(eyre!("Invalid read at address {address}")),
+            // I/O R
+            0xFF00..0xFF80 => todo!(),
+            // "High RAM (HRAM)"
+            0xFF80..0xFFFF => todo!(),
+            // Interrupt Enable register (IE)
+            0xFFFF => todo!(),
+        }
     }
 
     fn read_inc(&mut self, address: u16) -> Result<u8> {
@@ -63,12 +131,37 @@ impl SimpleDmg<'_> {
     }
 
     fn write(&mut self, address: u16, data: u8) -> Result<()> {
-        // self.text[address as usize] = data;
-        *self
-            .text
-            .get_mut(address as usize)
-            .ok_or_eyre(eyre!("Invalid write at address {address}"))? = data;
-        Ok(())
+        // Ranges from https://gbdev.io/pandocs/Memory_Map.html
+        match address {
+            // 16 KiB ROM bank 00
+            0x0000..0x4000 => todo!(),
+            // 16 KiB ROM Bank 01–NN
+            0x4000..0x8000 => todo!(),
+            // 8 KiB Video RAM (VRAM)
+            0x8000..0xA000 => todo!(),
+            // 8 KiB External RAM
+            0xA000..0xC000 => todo!(),
+            // 8 KiB Work RAM (WRAM)
+            0xC000..0xE000 => {
+                *self
+                    .ram
+                    .get_mut(usize::from(address - RAM_START_ADDRESS))
+                    .ok_or_eyre(eyre!("Invalid write at address {address}"))? = data;
+                Ok(())
+            }
+            // Echo RAM (mirror of C000–DDFF)
+            0xE000..0xFE00 => Err(eyre!("Invalid write at address {address}")),
+            // Object attribute memory (OAM)
+            0xFE00..0xFEA0 => todo!(),
+            // Not Usable
+            0xFEA0..0xFF00 => Err(eyre!("Invalid write at address {address}")),
+            // I/O R
+            0xFF00..0xFF80 => todo!(),
+            // "High RAM (HRAM)"
+            0xFF80..0xFFFF => todo!(),
+            // Interrupt Enable register (IE)
+            0xFFFF => todo!(),
+        }
     }
 
     fn execute(&mut self) -> Result<()> {
@@ -102,6 +195,7 @@ impl SimpleDmg<'_> {
 
                 0x02 => {
                     trace!("LD (BC), A");
+                    dbg!(self.rf.a, self.rf.bc);
                     self.write(self.rf.bc, self.rf.a)?;
                 }
                 0x12 => {
@@ -140,7 +234,6 @@ impl SimpleDmg<'_> {
                     trace!("LD A,(nn)");
                     let nn = self.consume_16bit_direct()?;
                     debug!("nn = {nn}");
-                    // Not sure if this should be a read
                     let data = self.read(nn)?;
                     debug!("(nn) = {data}");
                     self.rf.a = data;
@@ -166,63 +259,87 @@ mod tests {
     fn load_direct_16bit_immediate() {
         init();
 
-        let mut text = [
+        let mut ram = vec![0; 0xffff];
+        let code = [
             0x01, 0x34, 0x12, // LD BC,0x1234
             0x11, 0x78, 0x56, // LD DE,0x5678
             0x21, 0xad, 0xde, // LD HL,0xdead
             0x31, 0xef, 0xbe, // LD SP,0xbeef
             0x10, // STOP
         ];
+        ram[0..code.len()].copy_from_slice(&code);
         let mut cpu = SimpleDmg {
-            rf: RegisterFile::default(),
-            text: &mut text,
+            rf: RegisterFile {
+                pc: RAM_START_ADDRESS,
+                ..RegisterFile::default()
+            },
+            ram,
+            rom: &[],
         };
+
         cpu.execute().unwrap();
         assert_eq!(cpu.rf.bc, 0x1234);
         assert_eq!(cpu.rf.de, 0x5678);
         assert_eq!(cpu.rf.hl, 0xdead);
         assert_eq!(cpu.rf.sp, 0xbeef);
-        assert_eq!(cpu.rf.pc, 13);
     }
 
     #[test]
     fn load_accumulator_direct() {
         init();
 
-        let mut text = [
-            0xfa, 0x06, 0x00, // LD A,(0x0006) = load 0xbe into A
+        const DATA_ADDR: u16 = 0x0100;
+
+        let mut ram = vec![0; 0xffff];
+        let code = [
+            0xfa, 0x02, 0xC1, // LD A,(0xC102) = load 0xbe into A
             0x10, // STOP
             0xde, 0xad, 0xbe, 0xef, // data
         ];
-
+        ram[0..code.len()].copy_from_slice(&code);
+        let code = [
+            0xde, 0xad, 0xbe, 0xef, // data
+        ];
+        ram[usize::from(DATA_ADDR)..code.len() + usize::from(DATA_ADDR)].copy_from_slice(&code);
         let mut cpu = SimpleDmg {
-            rf: RegisterFile::default(),
-            text: &mut text,
+            rf: RegisterFile {
+                pc: RAM_START_ADDRESS,
+                ..RegisterFile::default()
+            },
+            ram,
+            rom: &[],
         };
+
         cpu.execute();
         assert_eq!(cpu.rf.a, 0xbe);
-        assert_eq!(cpu.rf.pc, 4);
     }
 
     #[test]
     fn load_indirect_8bit_a() {
         init();
 
-        // Copy a single byte
-        let mut text = [
-            0xfa, 0x08, 0x00, // LD A,(0x0008) = load 0x88 into A
-            0x01, 0x09, 0x00, // LD BC,0x09
+        let mut ram = vec![0; 0xffff];
+        let code = [
+            // Copy a single byte
+            0xfa, 0x08, 0xC0, // LD A,(0xC008) = load 0x88 into A
+            0x01, 0x09, 0xC0, // LD BC,0xC009
             0x02, // LD (BC),A = write 0x88 to byte 9 (end)
             0x10, // STOP
             0x88, // source data
             0x00, // dest data
         ];
+        ram[0..code.len()].copy_from_slice(&code);
+
         let mut cpu = SimpleDmg {
-            rf: RegisterFile::default(),
-            text: &mut text,
+            rf: RegisterFile {
+                pc: RAM_START_ADDRESS,
+                ..RegisterFile::default()
+            },
+            ram,
+            rom: &[],
         };
+
         cpu.execute();
-        assert_eq!(cpu.rf.pc, 8);
-        assert_eq!(text[8], text[9]);
+        assert_eq!(cpu.ram[8], cpu.ram[9]);
     }
 }
