@@ -192,7 +192,10 @@ impl<'rom> SimpleDmg<'rom> {
             }
             if cb_prefix {
                 cb_prefix = false;
-                self.cb_operation(opcode);
+                match Self::CB_OPCODES[usize::from(opcode)] {
+                    Some(f) => f(self, opcode)?,
+                    None => todo!("CB-prefixed opcode not yet implemented: {opcode:#x}"),
+                };
                 continue;
             }
 
@@ -240,21 +243,41 @@ impl<'rom> SimpleDmg<'rom> {
         None, None, None, None, None, None, None, None, None, None, Some(Self::ld_a_imm16mem), None, None, None, None, None,
     ];
 
-    fn cb_operation(&mut self, opcode: u8) {
-        match opcode {
-            0x7c => {
-                trace!("BIT 7,H");
-                if self.rf.hl.to_le_bytes()[1] & 0b10000000 == 0 {
-                    self.rf.f |= FLAG_ZERO;
-                } else {
-                    self.rf.f &= !FLAG_ZERO;
-                };
-                self.rf.f &= !FLAG_SUB;
-                self.rf.f |= FLAG_HALF_CARRY;
-            }
-            _ => todo!("CB-prefixed opcode not yet implemented: {opcode:#x}"),
-        }
-    }
+    #[rustfmt::skip]
+    const CB_OPCODES: [Option<OpcodeFn<'rom>>; 256] = [
+        // 0x00-0x0f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x10-0x1f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x20-0x2f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x30-0x3f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x40-0x4f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x50-0x5f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x60-0x6f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x70-0x7f
+        None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::bit_b3_r8), None, None, None,
+        // 0x80-0x8f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x90-0x9f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xa0-0xaf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xb0-0xbf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xc0-0xcf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xd0-0xdf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xe0-0xef
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xf0-0xff
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+    ];
 
     /*
      * The ordering of the opcode functions is inspired by
@@ -413,6 +436,27 @@ impl<'rom> SimpleDmg<'rom> {
         let data = self.read(nn)?;
         debug!("(nn) = {data:#x}");
         self.rf.a = data;
+        Ok(())
+    }
+
+    /*
+     * CB prefix opcodes
+     */
+
+    fn bit_b3_r8(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x7c => {
+                trace!("BIT 7,H");
+                if self.rf.hl.to_le_bytes()[1] & 0b10000000 == 0 {
+                    self.rf.f |= FLAG_ZERO;
+                } else {
+                    self.rf.f &= !FLAG_ZERO;
+                };
+                self.rf.f &= !FLAG_SUB;
+                self.rf.f |= FLAG_HALF_CARRY;
+            }
+            _ => unreachable!(),
+        }
         Ok(())
     }
 }
