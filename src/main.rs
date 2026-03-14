@@ -67,6 +67,8 @@ const FLAG_SUB: u8 = 0x40;
 const FLAG_HALF_CARRY: u8 = 0x20;
 const FLAG_CARRY: u8 = 0x10;
 
+type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<(), eyre::ErrReport>;
+
 impl<'rom> SimpleDmg<'rom> {
     pub fn new_with_bootrom(boot_rom: &'_ [u8; 256], rom: &'rom [u8]) -> Self {
         let mut ram = vec![0; 0x2000];
@@ -178,128 +180,270 @@ impl<'rom> SimpleDmg<'rom> {
             let opcode = self.read_pc_inc()?;
             debug!("pc:{:#x}, opcode:{:#x}", self.rf.pc, opcode);
 
+            // STOP
+            if opcode == 0x10 {
+                break;
+            }
+
+            // Special prefix to signal the altenrate set of opcodes
+            if opcode == 0xcb {
+                cb_prefix = true;
+                continue;
+            }
             if cb_prefix {
                 cb_prefix = false;
-                self.cb_operation(opcode);
+                match Self::CB_OPCODES[usize::from(opcode)] {
+                    Some(f) => f(self, opcode)?,
+                    None => todo!("CB-prefixed opcode not yet implemented: {opcode:#x}"),
+                };
                 continue;
             }
 
-            match opcode {
-                0x00 => trace!("NOP"),
-                0x10 => {
-                    trace!("STOP");
-                    break;
-                }
-
-                0x01 => {
-                    trace!("LD BC,nn");
-                    self.rf.bc = self.consume_16bit_direct()?;
-                }
-                0x11 => {
-                    trace!("LD DE,nn");
-                    self.rf.de = self.consume_16bit_direct()?;
-                }
-                0x21 => {
-                    trace!("LD HL,nn");
-                    self.rf.hl = self.consume_16bit_direct()?;
-                }
-                0x31 => {
-                    trace!("LD SP,nn");
-                    self.rf.sp = self.consume_16bit_direct()?;
-                }
-
-                0x02 => {
-                    trace!("LD (BC), A");
-                    dbg!(self.rf.a, self.rf.bc);
-                    self.write(self.rf.bc, self.rf.a)?;
-                }
-                0x12 => {
-                    trace!("LD (DE), A");
-                    self.write(self.rf.de, self.rf.a)?;
-                }
-                0x22 => {
-                    trace!("LD (HL+), A");
-                    self.write(self.rf.hl, self.rf.a)?;
-                    self.rf.hl = self.rf.hl.wrapping_add(1);
-                }
-                0x32 => {
-                    trace!("LD (HL-), A");
-                    self.write(self.rf.hl, self.rf.a)?;
-                    self.rf.hl = self.rf.hl.wrapping_sub(1);
-                }
-
-                0x03 => {
-                    trace!("INC BC");
-                    self.rf.bc = self.rf.bc.wrapping_add(1);
-                }
-                0x13 => {
-                    trace!("INC DE");
-                    self.rf.de = self.rf.de.wrapping_add(1);
-                }
-                0x23 => {
-                    trace!("INC HL");
-                    self.rf.hl = self.rf.hl.wrapping_add(1);
-                }
-                0x33 => {
-                    trace!("INC SP");
-                    self.rf.sp = self.rf.sp.wrapping_add(1);
-                }
-
-                0x0e => {
-                    trace!("LD C,N");
-                    let n = self.read_pc_inc()?;
-                    self.rf.bc = u16::from_le_bytes([n, self.rf.bc.to_le_bytes()[1]])
-                }
-                0x3e => {
-                    trace!("LD A,N");
-                    let n = self.read_pc_inc()?;
-                    self.rf.a = n;
-                }
-
-                0x20 => {
-                    trace!("JR NZ,e");
-                    let e = self.read_pc_inc()?.cast_signed();
-                    if self.rf.f & FLAG_ZERO == FLAG_ZERO {
-                        self.rf.pc = u16::try_from(i32::from(self.rf.pc) + i32::from(e))?;
-                    }
-                }
-
-                0xaf => {
-                    trace!("XOR A,A");
-                    self.rf.a = 0;
-                    self.rf.f = 0 | if self.rf.a == 0 { FLAG_ZERO } else { 0 };
-                }
-
-                0xcb => {
-                    cb_prefix = true;
-                    continue;
-                }
-
-                0xe2 => {
-                    trace!("LDH (C),A");
-                    let [c, _] = self.rf.bc.to_le_bytes();
-                    let address = u16::from_le_bytes([c, 0xff]);
-                    self.write(address, self.rf.a)?;
-                    debug!("Wrote data {:#x} to address {:#x}", self.rf.a, address);
-                }
-
-                0xfa => {
-                    trace!("LD A,(nn)");
-                    let nn = self.consume_16bit_direct()?;
-                    debug!("nn = {nn:#x}");
-                    let data = self.read(nn)?;
-                    debug!("(nn) = {data:#x}");
-                    self.rf.a = data;
-                }
-
-                _ => todo!("Opcode not yet implemented: {opcode:#x}"),
+            match Self::OPCODES[usize::from(opcode)] {
+                Some(f) => f(self, opcode)?,
+                None => todo!("Opcode not yet implemented: {opcode:#x}"),
             };
         }
-
         Ok(())
     }
 
-    fn cb_operation(&mut self, opcode: u8) {
+    #[rustfmt::skip]
+    const OPCODES: [Option<OpcodeFn<'rom>>; 256] = [
+        // 0x00-0x0f
+        Some(Self::nop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        // 0x10-0x1f
+        Some(Self::stop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        // 0x20-0x2f
+        Some(Self::jr_cond_imm8), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        // 0x30-0x3f
+        Some(Self::jr_cond_imm8), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        // 0x40-0x4f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x50-0x5f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x60-0x6f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x70-0x7f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x80-0x8f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x90-0x9f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xa0-0xaf
+        None, None, None, None, None, None, None, None, Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8),
+        // 0xb0-0xbf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xc0-0xcf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xd0-0xdf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xe0-0xef
+        None, None, Some(Self::ld_cmem_a), None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xf0-0xff
+        None, None, None, None, None, None, None, None, None, None, Some(Self::ld_a_imm16mem), None, None, None, None, None,
+    ];
+
+    #[rustfmt::skip]
+    const CB_OPCODES: [Option<OpcodeFn<'rom>>; 256] = [
+        // 0x00-0x0f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x10-0x1f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x20-0x2f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x30-0x3f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x40-0x4f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x50-0x5f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x60-0x6f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x70-0x7f
+        None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::bit_b3_r8), None, None, None,
+        // 0x80-0x8f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0x90-0x9f
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xa0-0xaf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xb0-0xbf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xc0-0xcf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xd0-0xdf
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xe0-0xef
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        // 0xf0-0xff
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+    ];
+
+    /*
+     * The ordering of the opcode functions is inspired by
+     * https://gbdev.io/pandocs/CPU_Instruction_Set.html
+     */
+
+    fn nop(&mut self, _opcode: u8) -> Result<()> {
+        trace!("NOP");
+        Ok(())
+    }
+
+    fn ld_rr_imm16(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x01 => {
+                trace!("LD BC,nn");
+                self.rf.bc = self.consume_16bit_direct()?;
+            }
+            0x11 => {
+                trace!("LD DE,nn");
+                self.rf.de = self.consume_16bit_direct()?;
+            }
+            0x21 => {
+                trace!("LD HL,nn");
+                self.rf.hl = self.consume_16bit_direct()?;
+            }
+            0x31 => {
+                trace!("LD SP,nn");
+                self.rf.sp = self.consume_16bit_direct()?;
+            }
+            _ => unreachable!(),
+        };
+        Ok(())
+    }
+
+    fn ld_r16mem_a(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x02 => {
+                trace!("LD (BC), A");
+                dbg!(self.rf.a, self.rf.bc);
+                self.write(self.rf.bc, self.rf.a)?;
+            }
+            0x12 => {
+                trace!("LD (DE), A");
+                self.write(self.rf.de, self.rf.a)?;
+            }
+            0x22 => {
+                trace!("LD (HL+), A");
+                self.write(self.rf.hl, self.rf.a)?;
+                self.rf.hl = self.rf.hl.wrapping_add(1);
+            }
+            0x32 => {
+                trace!("LD (HL-), A");
+                self.write(self.rf.hl, self.rf.a)?;
+                self.rf.hl = self.rf.hl.wrapping_sub(1);
+            }
+            _ => unreachable!(),
+        };
+        Ok(())
+    }
+
+    fn inc_r16(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x03 => {
+                trace!("INC BC");
+                self.rf.bc = self.rf.bc.wrapping_add(1);
+            }
+            0x13 => {
+                trace!("INC DE");
+                self.rf.de = self.rf.de.wrapping_add(1);
+            }
+            0x23 => {
+                trace!("INC HL");
+                self.rf.hl = self.rf.hl.wrapping_add(1);
+            }
+            0x33 => {
+                trace!("INC SP");
+                self.rf.sp = self.rf.sp.wrapping_add(1);
+            }
+            _ => unreachable!(),
+        };
+        Ok(())
+    }
+
+    fn ld_r8_imm8(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x0e => {
+                trace!("LD C,N");
+                let n = self.read_pc_inc()?;
+                self.rf.bc = u16::from_le_bytes([n, self.rf.bc.to_le_bytes()[1]])
+            }
+            0x1e => todo!(),
+            0x2e => todo!(),
+            0x3e => {
+                trace!("LD A,N");
+                let n = self.read_pc_inc()?;
+                self.rf.a = n;
+            }
+            _ => unreachable!(),
+        };
+        Ok(())
+    }
+
+    fn jr_cond_imm8(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x20 => {
+                trace!("JR NZ,e");
+                let e = self.read_pc_inc()?.cast_signed();
+                if self.rf.f & FLAG_ZERO == FLAG_ZERO {
+                    self.rf.pc = u16::try_from(i32::from(self.rf.pc) + i32::from(e))?;
+                }
+            }
+            0x30 => todo!(),
+            _ => unreachable!(),
+        };
+        Ok(())
+    }
+
+    fn stop(&mut self, opcode: u8) -> Result<()> {
+        trace!("STOP");
+        Err(eyre!("STOP encountered"))
+    }
+
+    fn xor_a_r8(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0xa8 => todo!(),
+            0xa9 => todo!(),
+            0xaa => todo!(),
+            0xab => todo!(),
+            0xac => todo!(),
+            0xad => todo!(),
+            0xae => todo!(),
+            0xaf => {
+                trace!("XOR A,A");
+                self.rf.a = 0;
+                // All flags are set by this instruction
+                self.rf.f = if self.rf.a == 0 { FLAG_ZERO } else { 0 };
+            }
+            _ => unreachable!(),
+        };
+        Ok(())
+    }
+
+    fn ld_cmem_a(&mut self, opcode: u8) -> Result<()> {
+        trace!("LDH (C),A");
+        let [c, _] = self.rf.bc.to_le_bytes();
+        let address = u16::from_le_bytes([c, 0xff]);
+        self.write(address, self.rf.a)?;
+        debug!("Wrote data {:#x} to address {:#x}", self.rf.a, address);
+        Ok(())
+    }
+
+    fn ld_a_imm16mem(&mut self, opcode: u8) -> Result<()> {
+        trace!("LD A,(nn)");
+        let nn = self.consume_16bit_direct()?;
+        debug!("nn = {nn:#x}");
+        let data = self.read(nn)?;
+        debug!("(nn) = {data:#x}");
+        self.rf.a = data;
+        Ok(())
+    }
+
+    /*
+     * CB prefix opcodes
+     */
+
+    fn bit_b3_r8(&mut self, opcode: u8) -> Result<()> {
         match opcode {
             0x7c => {
                 trace!("BIT 7,H");
@@ -311,8 +455,9 @@ impl<'rom> SimpleDmg<'rom> {
                 self.rf.f &= !FLAG_SUB;
                 self.rf.f |= FLAG_HALF_CARRY;
             }
-            _ => todo!("CB-prefixed opcode not yet implemented: {opcode:#x}"),
+            _ => unreachable!(),
         }
+        Ok(())
     }
 }
 
@@ -379,7 +524,7 @@ mod tests {
             rom: &[],
         };
 
-        cpu.execute();
+        cpu.execute().unwrap();
         assert_eq!(cpu.rf.a, 0xbe);
     }
 
@@ -404,7 +549,7 @@ mod tests {
             rom: &[],
         };
 
-        cpu.execute();
+        cpu.execute().unwrap();
         assert_eq!(cpu.rf.a, 0)
     }
 
@@ -433,7 +578,7 @@ mod tests {
             rom: &[],
         };
 
-        cpu.execute();
+        cpu.execute().unwrap();
         assert_eq!(cpu.ram[8], cpu.ram[9]);
     }
 }
