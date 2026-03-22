@@ -317,20 +317,24 @@ impl<'rom> SimpleDmg<'rom> {
     fn ld_rr_imm16(&mut self, opcode: u8) -> Result<()> {
         match opcode {
             0x01 => {
-                trace!("LD BC,nn");
-                self.rf.bc = self.consume_16bit_direct()?;
+                let nn = self.consume_16bit_direct()?;
+                self.rf.bc == nn;
+                trace!("LD BC,{nn:#x}");
             }
             0x11 => {
-                trace!("LD DE,nn");
-                self.rf.de = self.consume_16bit_direct()?;
+                let nn = self.consume_16bit_direct()?;
+                self.rf.de = nn;
+                trace!("LD DE,{nn:#x}");
             }
             0x21 => {
-                trace!("LD HL,nn");
-                self.rf.hl = self.consume_16bit_direct()?;
+                let nn = self.consume_16bit_direct()?;
+                self.rf.hl = nn;
+                trace!("LD HL,{nn:#x}");
             }
             0x31 => {
-                trace!("LD SP,nn");
-                self.rf.sp = self.consume_16bit_direct()?;
+                let nn = self.consume_16bit_direct()?;
+                self.rf.sp = nn;
+                trace!("LD SP,{nn:#x}");
             }
             _ => unreachable!(),
         };
@@ -423,11 +427,11 @@ impl<'rom> SimpleDmg<'rom> {
     fn jr_cond_imm8(&mut self, opcode: u8) -> Result<()> {
         match opcode {
             0x20 => {
-                trace!("JR NZ,e");
                 let e = self.read_pc_inc()?.cast_signed();
-                if self.rf.f & FLAG_ZERO == FLAG_ZERO {
+                if self.rf.f & FLAG_ZERO != FLAG_ZERO {
                     self.rf.pc = u16::try_from(i32::from(self.rf.pc) + i32::from(e))?;
                 }
+                trace!("JR NZ,{e:#x}");
             }
             0x30 => todo!(),
             _ => unreachable!(),
@@ -461,7 +465,7 @@ impl<'rom> SimpleDmg<'rom> {
             0xad => todo!(),
             0xae => todo!(),
             0xaf => {
-                trace!("XOR A,A");
+                trace!("XOR A");
                 self.rf.a = 0;
                 // All flags are set by this instruction
                 self.rf.f = if self.rf.a == 0 { FLAG_ZERO } else { 0 };
@@ -472,10 +476,10 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn ld_imm8mem_a(&mut self, opcode: u8) -> Result<()> {
-        trace!("LDH (n),A");
         let n = self.read_pc_inc()?;
         let address = u16::from_le_bytes([n, 0xff]);
         self.write(address, self.rf.a)?;
+        trace!("LDH ({n:#x}),A");
         Ok(())
     }
 
@@ -488,10 +492,10 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn ld_a_imm16mem(&mut self, opcode: u8) -> Result<()> {
-        trace!("LD A,(nn)");
         let nn = self.consume_16bit_direct()?;
         let data = self.read(nn)?;
         self.rf.a = data;
+        trace!("LD A,({nn:#x})");
         Ok(())
     }
 
