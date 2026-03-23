@@ -9,7 +9,7 @@ const SCALE_FACTOR: i32 = 8;
 
 impl Display {
     pub fn new() -> Self {
-        let (mut rl, thread) = raylib::init()
+        let (rl, _thread) = raylib::init()
             .size(160 * SCALE_FACTOR, 144 * SCALE_FACTOR)
             .build();
         Self { rl }

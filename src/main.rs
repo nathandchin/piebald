@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let mut boot_rom = [0; 256];
-    File::open(&args.boot_rom)?.read_exact(&mut boot_rom);
+    File::open(&args.boot_rom)?.read_exact(&mut boot_rom)?;
     debug!("{:#x?}", &boot_rom);
 
     let rom = {
@@ -85,7 +85,7 @@ type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<(), eyre::E
 
 impl<'rom> SimpleDmg<'rom> {
     pub fn new_with_bootrom(boot_rom: &'rom [u8], rom: &'rom [u8]) -> Self {
-        let mut ram = vec![0; usize::from(WRAM_SIZE + HRAM_SIZE)];
+        let ram = vec![0; usize::from(WRAM_SIZE + HRAM_SIZE)];
 
         Self {
             rf: RegisterFile::default(),
@@ -486,7 +486,7 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(())
     }
 
-    fn stop(&mut self, opcode: u8) -> Result<()> {
+    fn stop(&mut self, _opcode: u8) -> Result<()> {
         trace!("STOP");
         Err(eyre!("STOP encountered"))
     }
@@ -495,7 +495,7 @@ impl<'rom> SimpleDmg<'rom> {
         match opcode {
             0x77 => {
                 trace!("LD (HL),A");
-                self.write(self.rf.hl, self.rf.a);
+                self.write(self.rf.hl, self.rf.a)?;
             }
             _ => unreachable!(),
         }
@@ -527,16 +527,16 @@ impl<'rom> SimpleDmg<'rom> {
         let [pc_lsb, pc_msb] = self.rf.pc.to_le_bytes();
 
         self.rf.sp = self.rf.sp.wrapping_sub(1);
-        self.write(self.rf.sp, pc_msb);
+        self.write(self.rf.sp, pc_msb)?;
         self.rf.sp = self.rf.sp.wrapping_sub(1);
-        self.write(self.rf.sp, pc_lsb);
+        self.write(self.rf.sp, pc_lsb)?;
 
         self.rf.pc = nn;
 
         Ok(())
     }
 
-    fn ld_cmem_a(&mut self, opcode: u8) -> Result<()> {
+    fn ld_cmem_a(&mut self, _opcode: u8) -> Result<()> {
         trace!("LDH (C),A");
         let [c, _] = self.rf.bc.to_le_bytes();
         let address = u16::from_le_bytes([c, 0xff]);
@@ -544,7 +544,7 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(())
     }
 
-    fn ld_imm8mem_a(&mut self, opcode: u8) -> Result<()> {
+    fn ld_imm8mem_a(&mut self, _opcode: u8) -> Result<()> {
         let n = self.read_pc_inc()?;
         let address = u16::from_le_bytes([n, 0xff]);
         self.write(address, self.rf.a)?;
@@ -552,7 +552,7 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(())
     }
 
-    fn ld_a_imm16mem(&mut self, opcode: u8) -> Result<()> {
+    fn ld_a_imm16mem(&mut self, _opcode: u8) -> Result<()> {
         let nn = self.consume_16bit_direct()?;
         let data = self.read(nn)?;
         self.rf.a = data;
