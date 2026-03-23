@@ -64,6 +64,8 @@ struct SimpleDmg<'rom> {
     vram: Vec<u8>,
     ram: Vec<u8>, // stores both WRAM banks as well as HRAM
     rom: &'rom [u8],
+    boot_rom: &'rom [u8],
+    boot_rom_mapped: bool,
     display: Option<Display>,
 }
 
@@ -82,18 +84,16 @@ const FLAG_CARRY: u8 = 0x10;
 type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<(), eyre::ErrReport>;
 
 impl<'rom> SimpleDmg<'rom> {
-    pub fn new_with_bootrom(boot_rom: &'_ [u8; 256], rom: &'rom [u8]) -> Self {
+    pub fn new_with_bootrom(boot_rom: &'rom [u8], rom: &'rom [u8]) -> Self {
         let mut ram = vec![0; usize::from(WRAM_SIZE + HRAM_SIZE)];
-        ram[..256].clone_from_slice(boot_rom);
 
         Self {
-            rf: RegisterFile {
-                pc: WRAM_START_ADDRESS,
-                ..RegisterFile::default()
-            },
+            rf: RegisterFile::default(),
             ram,
             vram: vec![0; usize::from(VRAM_SIZE)],
             rom,
+            boot_rom,
+            boot_rom_mapped: true,
             display: None,
         }
     }
@@ -104,7 +104,13 @@ impl<'rom> SimpleDmg<'rom> {
             // 16 KiB ROM bank 00
             0x0000..0x4000 => {
                 let actual_addr = usize::from(address);
-                let res = self.rom.get(actual_addr).copied();
+
+                let res = if self.boot_rom_mapped && actual_addr < 0x100 {
+                    self.boot_rom.get(actual_addr).copied()
+                } else {
+                    self.rom.get(actual_addr).copied()
+                };
+
                 if let Some(res) = res {
                     debug!(
                         "Read {:#x} from ROM at {:#x} (={actual_addr:#x})",
@@ -345,7 +351,7 @@ impl<'rom> SimpleDmg<'rom> {
         match opcode {
             0x01 => {
                 let nn = self.consume_16bit_direct()?;
-                self.rf.bc == nn;
+                self.rf.bc = nn;
                 trace!("LD BC,{nn:#x}");
             }
             0x11 => {
@@ -525,7 +531,7 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.sp = self.rf.sp.wrapping_sub(1);
         self.write(self.rf.sp, pc_lsb);
 
-        self.rf.pc == nn;
+        self.rf.pc = nn;
 
         Ok(())
     }
