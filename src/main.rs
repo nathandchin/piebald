@@ -4,8 +4,9 @@ mod display;
 
 use display::Display;
 
-use std::{fs::File, io::Read};
+use std::{fs::File, io::Read, ops::Shl};
 
+use bitflags::bitflags;
 use clap::Parser;
 use eyre::{OptionExt, Result, eyre};
 use log::{debug, trace};
@@ -45,7 +46,7 @@ struct RegisterFile {
     /// Accumulator
     a: u8,
     /// Flags
-    f: u8,
+    f: Flags,
 
     /// General purpose registers
     bc: u16,
@@ -76,10 +77,19 @@ const VRAM_SIZE: u16 = 0x2000; // 1 bank
 const WRAM_SIZE: u16 = 0x2000; // 2 banks
 const HRAM_SIZE: u16 = 0x7f;
 
-const FLAG_ZERO: u8 = 0x80;
-const FLAG_SUB: u8 = 0x40;
-const FLAG_HALF_CARRY: u8 = 0x20;
-const FLAG_CARRY: u8 = 0x10;
+bitflags! {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct Flags: u8 {
+        /// Carry
+        const C = 0b00010000;
+        /// Half Carry
+        const H = 0b00100000;
+        /// Subtraction
+        const N = 0b01000000;
+        /// Zero
+        const Z = 0b10000000;
+    }
+}
 
 type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<(), eyre::ErrReport>;
 
@@ -268,7 +278,7 @@ impl<'rom> SimpleDmg<'rom> {
     #[rustfmt::skip]
     const OPCODES: [Option<OpcodeFn<'rom>>; 256] = [
         // 0x00-0x0f
-        Some(Self::nop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
+        Some(Self::nop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
         Some(Self::stop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
@@ -276,7 +286,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x30-0x3f
         Some(Self::jr_cond_imm8), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x40-0x4f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_r8),
         // 0x50-0x5f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x60-0x6f
@@ -292,7 +302,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xb0-0xbf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xc0-0xcf
-        None, None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::call_imm16), None, None,
+        None, None, None, None, None, Some(Self::push_r16stk), None, None, None, None, None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xe0-0xef
@@ -306,7 +316,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x00-0x0f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x10-0x1f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        None, Some(Self::rl_r8), None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x20-0x2f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x30-0x3f
@@ -454,16 +464,24 @@ impl<'rom> SimpleDmg<'rom> {
 
     fn ld_r8_imm8(&mut self, opcode: u8) -> Result<()> {
         match opcode {
-            0x0e => {
-                trace!("LD C,N");
+            0x06 => {
                 let n = self.read_pc_inc()?;
+                trace!("LD B,{n:#x}");
+                self.rf.bc = u16::from_le_bytes([self.rf.bc.to_le_bytes()[0], n])
+            }
+            0x0e => {
+                let n = self.read_pc_inc()?;
+                trace!("LD C,{n:#x}");
                 self.rf.bc = u16::from_le_bytes([n, self.rf.bc.to_le_bytes()[1]])
             }
+            0x16 => todo!(),
             0x1e => todo!(),
+            0x26 => todo!(),
             0x2e => todo!(),
+            0x36 => todo!(),
             0x3e => {
-                trace!("LD A,N");
                 let n = self.read_pc_inc()?;
+                trace!("LD A,{n:#x}");
                 self.rf.a = n;
             }
             _ => unreachable!(),
@@ -475,7 +493,7 @@ impl<'rom> SimpleDmg<'rom> {
         match opcode {
             0x20 => {
                 let e = self.read_pc_inc()?.cast_signed();
-                if self.rf.f & FLAG_ZERO != FLAG_ZERO {
+                if !self.rf.f.contains(Flags::Z) {
                     self.rf.pc = u16::try_from(i32::from(self.rf.pc) + i32::from(e))?;
                 }
                 trace!("JR NZ,{e:#x}");
@@ -493,6 +511,10 @@ impl<'rom> SimpleDmg<'rom> {
 
     fn ld_r8_r8(&mut self, opcode: u8) -> Result<()> {
         match opcode {
+            0x4f => {
+                trace!("LD C,A");
+                self.rf.bc = u16::from_le_bytes([self.rf.a, self.rf.bc.to_le_bytes()[1]]);
+            }
             0x77 => {
                 trace!("LD (HL),A");
                 self.write(self.rf.hl, self.rf.a)?;
@@ -514,8 +536,10 @@ impl<'rom> SimpleDmg<'rom> {
             0xaf => {
                 trace!("XOR A");
                 self.rf.a = 0;
-                // All flags are set by this instruction
-                self.rf.f = if self.rf.a == 0 { FLAG_ZERO } else { 0 };
+                self.rf.f.set(Flags::C, false);
+                self.rf.f.set(Flags::H, false);
+                self.rf.f.set(Flags::N, false);
+                self.rf.f.set(Flags::Z, self.rf.a == 0);
             }
             _ => unreachable!(),
         };
@@ -524,6 +548,7 @@ impl<'rom> SimpleDmg<'rom> {
 
     fn call_imm16(&mut self, _opcode: u8) -> Result<()> {
         let nn = self.consume_16bit_direct()?;
+        trace!("CALL {nn:#x}");
         let [pc_lsb, pc_msb] = self.rf.pc.to_le_bytes();
 
         self.rf.sp = self.rf.sp.wrapping_sub(1);
@@ -533,6 +558,22 @@ impl<'rom> SimpleDmg<'rom> {
 
         self.rf.pc = nn;
 
+        Ok(())
+    }
+
+    fn push_r16stk(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0xc5 => {
+                trace!("PUSH BC");
+                let [bc_lsb, bc_msb] = self.rf.bc.to_le_bytes();
+
+                self.rf.sp = self.rf.sp.wrapping_sub(1);
+                self.write(self.rf.sp, bc_msb)?;
+                self.rf.sp = self.rf.sp.wrapping_sub(1);
+                self.write(self.rf.sp, bc_lsb)?;
+            }
+            _ => unreachable!(),
+        }
         Ok(())
     }
 
@@ -564,17 +605,40 @@ impl<'rom> SimpleDmg<'rom> {
      * CB prefix opcodes
      */
 
+    fn rl_r8(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x11 => {
+                trace!("RL C");
+                let [mut c, b] = self.rf.bc.to_le_bytes();
+
+                let c7 = c & 0b10000000;
+                let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
+                c = c.shl(1) | carry_bit;
+
+                self.rf.f.set(Flags::Z, c == 0);
+                self.rf.f.set(Flags::N, false);
+                self.rf.f.set(Flags::H, false);
+                self.rf.f.set(Flags::C, c7 == 1);
+
+                self.rf.bc = u16::from_le_bytes([c, b]);
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
     fn bit_b3_r8(&mut self, opcode: u8) -> Result<()> {
         match opcode {
             0x7c => {
                 trace!("BIT 7,H");
                 if self.rf.hl.to_le_bytes()[1] & 0b10000000 == 0 {
-                    self.rf.f |= FLAG_ZERO;
+                    self.rf.f.insert(Flags::Z);
                 } else {
-                    self.rf.f &= !FLAG_ZERO;
+                    self.rf.f.remove(Flags::Z);
                 };
-                self.rf.f &= !FLAG_SUB;
-                self.rf.f |= FLAG_HALF_CARRY;
+                self.rf.f.remove(Flags::N);
+                self.rf.f.insert(Flags::H);
             }
             _ => unreachable!(),
         }
