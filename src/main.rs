@@ -61,14 +61,19 @@ struct RegisterFile {
 #[derive(Debug)]
 struct SimpleDmg<'rom> {
     rf: RegisterFile,
-    ram: Vec<u8>,
     vram: Vec<u8>,
+    ram: Vec<u8>, // stores both WRAM banks as well as HRAM
     rom: &'rom [u8],
     display: Option<Display>,
 }
 
-const RAM_START_ADDRESS: u16 = 0xc000;
 const VRAM_START_ADDRESS: u16 = 0x8000;
+const WRAM_START_ADDRESS: u16 = 0xc000;
+const HRAM_START_ADDRESS: u16 = 0xff80;
+const VRAM_SIZE: u16 = 0x2000; // 1 bank
+const WRAM_SIZE: u16 = 0x2000; // 2 banks
+const HRAM_SIZE: u16 = 0x7f;
+
 const FLAG_ZERO: u8 = 0x80;
 const FLAG_SUB: u8 = 0x40;
 const FLAG_HALF_CARRY: u8 = 0x20;
@@ -78,16 +83,16 @@ type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<(), eyre::E
 
 impl<'rom> SimpleDmg<'rom> {
     pub fn new_with_bootrom(boot_rom: &'_ [u8; 256], rom: &'rom [u8]) -> Self {
-        let mut ram = vec![0; 0x2000];
+        let mut ram = vec![0; usize::from(WRAM_SIZE + HRAM_SIZE)];
         ram[..256].clone_from_slice(boot_rom);
 
         Self {
             rf: RegisterFile {
-                pc: RAM_START_ADDRESS,
+                pc: WRAM_START_ADDRESS,
                 ..RegisterFile::default()
             },
             ram,
-            vram: vec![0; 0x2000],
+            vram: vec![0; usize::from(VRAM_SIZE)],
             rom,
             display: None,
         }
@@ -97,7 +102,17 @@ impl<'rom> SimpleDmg<'rom> {
         // Ranges from https://gbdev.io/pandocs/Memory_Map.html
         match address {
             // 16 KiB ROM bank 00
-            0x0000..0x4000 => todo!(),
+            0x0000..0x4000 => {
+                let actual_addr = usize::from(address);
+                let res = self.rom.get(actual_addr).copied();
+                if let Some(res) = res {
+                    debug!(
+                        "Read {:#x} from ROM at {:#x} (={actual_addr:#x})",
+                        res, address
+                    );
+                }
+                res.ok_or_else(|| eyre!("Error reading from ROM at address {address:#x}"))
+            }
             // 16 KiB ROM Bank 01–NN
             0x4000..0x8000 => todo!(),
             // 8 KiB Video RAM (VRAM)
@@ -106,16 +121,17 @@ impl<'rom> SimpleDmg<'rom> {
             0xA000..0xC000 => todo!(),
             // 8 KiB Work RAM (WRAM)
             0xC000..0xE000 => {
-                let res = self
-                    .ram
-                    .get(usize::from(address - RAM_START_ADDRESS))
-                    .copied();
+                let actual_addr = address - WRAM_START_ADDRESS;
+                let res = self.ram.get(usize::from(actual_addr)).copied();
 
                 if let Some(res) = res {
-                    debug!("Read {:#x} from WRAM at {:#x}", res, address);
+                    debug!(
+                        "Read {:#x} from WRAM at {:#x} (={actual_addr:#x})",
+                        res, address
+                    );
                 }
 
-                res.ok_or_else(|| eyre!("Error reading from ram at address {address:#x}"))
+                res.ok_or_else(|| eyre!("Error reading from RAM at address {address:#x}"))
             }
             // Echo RAM (mirror of C000–DDFF)
             0xE000..0xFE00 => Err(eyre!("Invalid read at address {address:#x}")),
@@ -159,10 +175,11 @@ impl<'rom> SimpleDmg<'rom> {
             0x4000..0x8000 => todo!(),
             // 8 KiB Video RAM (VRAM)
             0x8000..0xA000 => {
-                debug!("Write to VRAM at {:#x}", address);
+                let actual_addr = usize::from(address - VRAM_START_ADDRESS);
+                debug!("Write to VRAM at {address:#x} (={actual_addr:#x})");
                 *self
                     .vram
-                    .get_mut(usize::from(address - VRAM_START_ADDRESS))
+                    .get_mut(actual_addr)
                     .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
                 Ok(())
             }
@@ -170,10 +187,11 @@ impl<'rom> SimpleDmg<'rom> {
             0xA000..0xC000 => todo!(),
             // 8 KiB Work RAM (WRAM)
             0xC000..0xE000 => {
-                debug!("Write to WRAM at {:#x}", address);
+                let actual_addr = usize::from(address - WRAM_START_ADDRESS);
+                debug!("Write to WRAM at {address:#x} (={actual_addr:#x})");
                 *self
                     .ram
-                    .get_mut(usize::from(address - RAM_START_ADDRESS))
+                    .get_mut(actual_addr)
                     .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
                 Ok(())
             }
@@ -189,7 +207,16 @@ impl<'rom> SimpleDmg<'rom> {
                 Ok(())
             }
             // "High RAM (HRAM)"
-            0xFF80..0xFFFF => todo!(),
+            0xFF80..0xFFFF => {
+                let actual_addr =
+                    usize::from(address) - usize::from(HRAM_START_ADDRESS) + usize::from(VRAM_SIZE);
+                debug!("Write to HRAM at {address:#x} (={actual_addr:#x})");
+                *self
+                    .ram
+                    .get_mut(actual_addr)
+                    .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
+                Ok(())
+            }
             // Interrupt Enable register (IE)
             0xFFFF => todo!(),
         }
@@ -237,7 +264,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x00-0x0f
         Some(Self::nop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
-        Some(Self::stop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::stop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
         Some(Self::jr_cond_imm8), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x30-0x3f
@@ -259,7 +286,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xb0-0xbf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xc0-0xcf
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xe0-0xef
@@ -364,6 +391,20 @@ impl<'rom> SimpleDmg<'rom> {
             }
             _ => unreachable!(),
         };
+        Ok(())
+    }
+
+    fn ld_a_r16mem(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0x0a => todo!(),
+            0x1a => {
+                trace!("LD A,(DE)");
+                self.rf.a = self.read(self.rf.de)?;
+            }
+            0x2a => todo!(),
+            0x3a => todo!(),
+            _ => unreachable!(),
+        }
         Ok(())
     }
 
@@ -475,11 +516,17 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(())
     }
 
-    fn ld_imm8mem_a(&mut self, opcode: u8) -> Result<()> {
-        let n = self.read_pc_inc()?;
-        let address = u16::from_le_bytes([n, 0xff]);
-        self.write(address, self.rf.a)?;
-        trace!("LDH ({n:#x}),A");
+    fn call_imm16(&mut self, _opcode: u8) -> Result<()> {
+        let nn = self.consume_16bit_direct()?;
+        let [pc_lsb, pc_msb] = self.rf.pc.to_le_bytes();
+
+        self.rf.sp = self.rf.sp.wrapping_sub(1);
+        self.write(self.rf.sp, pc_msb);
+        self.rf.sp = self.rf.sp.wrapping_sub(1);
+        self.write(self.rf.sp, pc_lsb);
+
+        self.rf.pc == nn;
+
         Ok(())
     }
 
@@ -488,6 +535,14 @@ impl<'rom> SimpleDmg<'rom> {
         let [c, _] = self.rf.bc.to_le_bytes();
         let address = u16::from_le_bytes([c, 0xff]);
         self.write(address, self.rf.a)?;
+        Ok(())
+    }
+
+    fn ld_imm8mem_a(&mut self, opcode: u8) -> Result<()> {
+        let n = self.read_pc_inc()?;
+        let address = u16::from_le_bytes([n, 0xff]);
+        self.write(address, self.rf.a)?;
+        trace!("LDH ({n:#x}),A");
         Ok(())
     }
 
@@ -544,13 +599,13 @@ mod tests {
         ram[0..code.len()].copy_from_slice(&code);
         let mut cpu = SimpleDmg {
             rf: RegisterFile {
-                pc: RAM_START_ADDRESS,
+                pc: WRAM_START_ADDRESS,
                 ..RegisterFile::default()
             },
             ram,
             vram: vec![],
             rom: &[],
-            display: None
+            display: None,
         };
 
         cpu.execute().unwrap();
@@ -579,13 +634,13 @@ mod tests {
         ram[usize::from(DATA_ADDR)..code.len() + usize::from(DATA_ADDR)].copy_from_slice(&code);
         let mut cpu = SimpleDmg {
             rf: RegisterFile {
-                pc: RAM_START_ADDRESS,
+                pc: WRAM_START_ADDRESS,
                 ..RegisterFile::default()
             },
             ram,
             vram: vec![],
             rom: &[],
-            display: None
+            display: None,
         };
 
         cpu.execute().unwrap();
@@ -606,13 +661,13 @@ mod tests {
         let mut cpu = SimpleDmg {
             rf: RegisterFile {
                 a: 0xde,
-                pc: RAM_START_ADDRESS,
+                pc: WRAM_START_ADDRESS,
                 ..RegisterFile::default()
             },
             ram,
             vram: vec![],
             rom: &[],
-            display: None
+            display: None,
         };
 
         cpu.execute().unwrap();
@@ -637,13 +692,13 @@ mod tests {
 
         let mut cpu = SimpleDmg {
             rf: RegisterFile {
-                pc: RAM_START_ADDRESS,
+                pc: WRAM_START_ADDRESS,
                 ..RegisterFile::default()
             },
             ram,
             vram: vec![],
             rom: &[],
-            display: None
+            display: None,
         };
 
         cpu.execute().unwrap();
