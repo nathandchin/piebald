@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 mod display;
 
 use display::Display;
@@ -36,6 +34,7 @@ fn main() -> Result<()> {
     dmg.execute()
 }
 
+#[allow(unused)]
 #[derive(Default, Debug)]
 struct RegisterFile {
     /// Instruction register
@@ -137,8 +136,8 @@ impl<'rom> SimpleDmg<'rom> {
             0xA000..0xC000 => todo!(),
             // 8 KiB Work RAM (WRAM)
             0xC000..0xE000 => {
-                let actual_addr = address - WRAM_START_ADDRESS;
-                let res = self.ram.get(usize::from(actual_addr)).copied();
+                let actual_addr = usize::from(address) - usize::from(WRAM_START_ADDRESS);
+                let res = self.ram.get(actual_addr).copied();
 
                 if let Some(res) = res {
                     debug!(
@@ -158,7 +157,20 @@ impl<'rom> SimpleDmg<'rom> {
             // I/O Registers
             0xFF00..0xFF80 => todo!(),
             // "High RAM (HRAM)"
-            0xFF80..0xFFFF => todo!(),
+            0xFF80..0xFFFF => {
+                let actual_addr =
+                    usize::from(address) - usize::from(HRAM_START_ADDRESS) + usize::from(VRAM_SIZE);
+                let res = self.ram.get(actual_addr).copied();
+
+                if let Some(res) = res {
+                    debug!(
+                        "Read {:#x} from HRAM at {:#x} (={actual_addr:#x})",
+                        res, address
+                    );
+                }
+
+                res.ok_or_else(|| eyre!("Error reading from RAM at address {address:#x}"))
+            }
             // Interrupt Enable register (IE)
             0xFFFF => todo!(),
         }
@@ -280,7 +292,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x00-0x0f
         Some(Self::nop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
-        Some(Self::stop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::stop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, Some(Self::rla), None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
         Some(Self::jr_cond_imm8), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x30-0x3f
@@ -302,7 +314,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xb0-0xbf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xc0-0xcf
-        None, None, None, None, None, Some(Self::push_r16stk), None, None, None, None, None, None, None, Some(Self::call_imm16), None, None,
+        None, Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, None, None, None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xe0-0xef
@@ -452,7 +464,13 @@ impl<'rom> SimpleDmg<'rom> {
             0x0c => {
                 trace!("INC C");
                 let [b, c] = self.rf.bc.to_le_bytes();
-                self.rf.bc = u16::from_le_bytes([b, c.wrapping_add(1)]);
+                let new_c = c.wrapping_add(1);
+
+                self.rf.bc = u16::from_le_bytes([b, new_c]);
+
+                self.rf.f.set(Flags::H, ((c ^ 1 ^ new_c ) & 0x10) == 0x10);
+                self.rf.f.set(Flags::N, false);
+                self.rf.f.set(Flags::Z, new_c == 0);
             }
             0x13 => todo!(),
             0x23 => todo!(),
@@ -486,6 +504,24 @@ impl<'rom> SimpleDmg<'rom> {
             }
             _ => unreachable!(),
         };
+        Ok(())
+    }
+
+    fn rla(&mut self, _opcode: u8) -> Result<()> {
+        trace!("RLA");
+        let mut a = self.rf.a;
+
+        let a7 = a & 0b10000000;
+        let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
+        a = a.shl(1) | carry_bit;
+
+        self.rf.f.set(Flags::Z, false);
+        self.rf.f.set(Flags::N, false);
+        self.rf.f.set(Flags::H, false);
+        self.rf.f.set(Flags::C, a7 == 1);
+
+        self.rf.a = a;
+
         Ok(())
     }
 
@@ -558,6 +594,21 @@ impl<'rom> SimpleDmg<'rom> {
 
         self.rf.pc = nn;
 
+        Ok(())
+    }
+
+    fn pop_r16stk(&mut self, opcode: u8) -> Result<()> {
+        match opcode {
+            0xc1 => {
+                trace!("POP BC");
+                let lsb = self.read(self.rf.sp)?;
+                self.rf.sp = self.rf.sp.wrapping_add(1);
+                let msb = self.read(self.rf.sp)?;
+                self.rf.sp = self.rf.sp.wrapping_add(1);
+                self.rf.bc = u16::from_le_bytes([lsb, msb]);
+            }
+            _ => unreachable!(),
+        }
         Ok(())
     }
 

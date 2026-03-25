@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use raylib::prelude::*;
 
 #[derive(Debug)]
