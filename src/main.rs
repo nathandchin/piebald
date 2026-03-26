@@ -48,9 +48,12 @@ struct RegisterFile {
     f: Flags,
 
     /// General purpose registers
-    bc: u16,
-    de: u16,
-    hl: u16,
+    b: u8,
+    c: u8,
+    d: u8,
+    e: u8,
+    h: u8,
+    l: u8,
 
     /// Program counter
     pc: u16,
@@ -87,6 +90,9 @@ bitflags! {
         const N = 0b01000000;
         /// Zero
         const Z = 0b10000000;
+
+        // Declare all bits as known so that they aren't invisibly modified
+        const _ = !0;
     }
 }
 
@@ -104,6 +110,191 @@ impl<'rom> SimpleDmg<'rom> {
             boot_rom,
             boot_rom_mapped: true,
             display: None,
+        }
+    }
+
+    fn get_r8(&self, r: u8) -> Result<u8> {
+        Ok(match r {
+            0 => self.rf.b,
+            1 => self.rf.c,
+            2 => self.rf.d,
+            3 => self.rf.e,
+            4 => self.rf.h,
+            5 => self.rf.l,
+            6 => {
+                let addr = u16::from_be_bytes([self.rf.h, self.rf.l]);
+                self.read(addr)?
+            }
+            7 => self.rf.a,
+            _ => unreachable!("Invalid R8 identifier"),
+        })
+    }
+
+    fn set_r8(&mut self, r: u8, n: u8) -> Result<()> {
+        match r {
+            0 => self.rf.b = n,
+            1 => self.rf.c = n,
+            2 => self.rf.d = n,
+            3 => self.rf.e = n,
+            4 => self.rf.h = n,
+            5 => self.rf.l = n,
+            6 => {
+                let addr = u16::from_be_bytes([self.rf.h, self.rf.l]);
+                self.write(addr, n)?;
+            }
+            7 => self.rf.a = n,
+            _ => unreachable!("Invalid R8 identifier"),
+        }
+        Ok(())
+    }
+
+    fn get_r8_name(r: u8) -> &'static str {
+        match r {
+            0 => "B",
+            1 => "C",
+            2 => "D",
+            3 => "E",
+            4 => "H",
+            5 => "L",
+            6 => "(HL)",
+            7 => "A",
+            _ => unreachable!("Invalid R8 identifier"),
+        }
+    }
+
+    fn get_r16(&self, r: u8) -> u16 {
+        match r {
+            0 => u16::from_be_bytes([self.rf.b, self.rf.c]),
+            1 => u16::from_be_bytes([self.rf.d, self.rf.e]),
+            2 => u16::from_be_bytes([self.rf.h, self.rf.l]),
+            3 => self.rf.sp,
+            _ => unreachable!("Invalid R16 identifier"),
+        }
+    }
+
+    fn set_r16(&mut self, r: u8, n: u16) {
+        let [lsb, msb] = n.to_le_bytes();
+        match r {
+            0 => {
+                self.rf.b = msb;
+                self.rf.c = lsb;
+            }
+            1 => {
+                self.rf.d = msb;
+                self.rf.e = lsb;
+            }
+            2 => {
+                self.rf.h = msb;
+                self.rf.l = lsb;
+            }
+            3 => {
+                self.rf.sp = n;
+            }
+            _ => unreachable!("Invalid R16 identifier"),
+        };
+    }
+
+    fn get_r16_name(r: u8) -> &'static str {
+        match r {
+            0 => "BC",
+            1 => "DE",
+            2 => "HL",
+            3 => "SP",
+            _ => unreachable!("Invalid R16 identifier"),
+        }
+    }
+
+    fn get_r16stk(&self, r: u8) -> u16 {
+        match r {
+            0 => u16::from_be_bytes([self.rf.b, self.rf.c]),
+            1 => u16::from_be_bytes([self.rf.d, self.rf.e]),
+            2 => u16::from_be_bytes([self.rf.h, self.rf.l]),
+            3 => u16::from_be_bytes([self.rf.a, self.rf.f.bits()]),
+            _ => unreachable!("Invalid R16stk identifier"),
+        }
+    }
+
+    fn set_r16stk(&mut self, r: u8, n: u16) {
+        let [lsb, msb] = n.to_le_bytes();
+        match r {
+            0..=2 => {
+                self.set_r16(r, n);
+            }
+            3 => {
+                self.rf.a = msb;
+                self.rf.f = Flags::from_bits_retain(lsb);
+            }
+            _ => unreachable!("Invalid R16stk identifier"),
+        };
+    }
+
+    fn get_r16stk_name(r: u8) -> &'static str {
+        match r {
+            0 => "BC",
+            1 => "DE",
+            2 => "HL",
+            3 => "AF",
+            _ => unreachable!("Invalid R16stk identifier"),
+        }
+    }
+
+    fn get_r16mem(&mut self, r: u8) -> Result<u8> {
+        match r {
+            0 | 1 => self.read(self.get_r16(r)),
+            2 | 3 => {
+                let mut hl = u16::from_be_bytes([self.rf.h, self.rf.l]);
+
+                // Unwrap now so that we don't increment/decrement HL if there
+                // was an error
+                let res = self.read(hl)?;
+
+                // Handle HL+/HL-
+                if r == 2 {
+                    hl = hl.wrapping_add(1);
+                } else {
+                    hl = hl.wrapping_sub(1);
+                }
+                let [h, l] = hl.to_be_bytes();
+                self.rf.h = h;
+                self.rf.l = l;
+
+                Ok(res)
+            }
+            _ => unreachable!("Invalid R16mem identifier"),
+        }
+    }
+
+    fn set_r16mem(&mut self, r: u8, n: u8) -> Result<()> {
+        match r {
+            0 | 1 => self.write(self.get_r16(r), n),
+            2 | 3 => {
+                let mut hl = u16::from_be_bytes([self.rf.h, self.rf.l]);
+
+                self.write(hl, n)?;
+
+                // Handle HL+/HL-
+                if r == 2 {
+                    hl = hl.wrapping_add(1);
+                } else {
+                    hl = hl.wrapping_sub(1);
+                }
+                let [h, l] = hl.to_be_bytes();
+                self.rf.h = h;
+                self.rf.l = l;
+
+                Ok(())
+            }
+            _ => unreachable!("Invalid R16mem identifier"),
+        }
+    }
+
+    fn get_r16mem_name(r: u8) -> &'static str {
+        match r {
+            0 => "BC",
+            1 => "DE",
+            2 => "HL+",
+            3 => "HL-",
+            _ => unreachable!("Invalid R16mem identifier"),
         }
     }
 
@@ -290,13 +481,13 @@ impl<'rom> SimpleDmg<'rom> {
     #[rustfmt::skip]
     const OPCODES: [Option<OpcodeFn<'rom>>; 256] = [
         // 0x00-0x0f
-        Some(Self::nop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
+        Some(Self::nop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
-        Some(Self::stop), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, Some(Self::rla), None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, Some(Self::rla), None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
-        Some(Self::jr_cond_imm8), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x30-0x3f
-        Some(Self::jr_cond_imm8), Some(Self::ld_rr_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x40-0x4f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_r8),
         // 0x50-0x5f
@@ -369,142 +560,51 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(())
     }
 
-    fn ld_rr_imm16(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x01 => {
-                let nn = self.consume_16bit_direct()?;
-                self.rf.bc = nn;
-                trace!("LD BC,{nn:#x}");
-            }
-            0x11 => {
-                let nn = self.consume_16bit_direct()?;
-                self.rf.de = nn;
-                trace!("LD DE,{nn:#x}");
-            }
-            0x21 => {
-                let nn = self.consume_16bit_direct()?;
-                self.rf.hl = nn;
-                trace!("LD HL,{nn:#x}");
-            }
-            0x31 => {
-                let nn = self.consume_16bit_direct()?;
-                self.rf.sp = nn;
-                trace!("LD SP,{nn:#x}");
-            }
-            _ => unreachable!(),
-        };
+    fn ld_r16_imm16(&mut self, opcode: u8) -> Result<()> {
+        let nn = self.consume_16bit_direct()?;
+        trace!("LD {},{nn:#x}", Self::get_r16_name(opcode >> 4));
+        self.set_r16(opcode >> 4, nn);
         Ok(())
     }
 
     fn ld_r16mem_a(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x02 => {
-                trace!("LD (BC), A");
-                dbg!(self.rf.a, self.rf.bc);
-                self.write(self.rf.bc, self.rf.a)?;
-            }
-            0x12 => {
-                trace!("LD (DE), A");
-                self.write(self.rf.de, self.rf.a)?;
-            }
-            0x22 => {
-                trace!("LD (HL+), A");
-                self.write(self.rf.hl, self.rf.a)?;
-                self.rf.hl = self.rf.hl.wrapping_add(1);
-            }
-            0x32 => {
-                trace!("LD (HL-), A");
-                self.write(self.rf.hl, self.rf.a)?;
-                self.rf.hl = self.rf.hl.wrapping_sub(1);
-            }
-            _ => unreachable!(),
-        };
-        Ok(())
+        trace!("LD ({}), A", Self::get_r16mem_name(opcode >> 4));
+        self.set_r16mem(opcode >> 4, self.rf.a)
     }
 
     fn ld_a_r16mem(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x0a => todo!(),
-            0x1a => {
-                trace!("LD A,(DE)");
-                self.rf.a = self.read(self.rf.de)?;
-            }
-            0x2a => todo!(),
-            0x3a => todo!(),
-            _ => unreachable!(),
-        }
+        trace!("LD A, ({})", Self::get_r16mem_name(opcode >> 4));
+        self.rf.a = self.get_r16mem(opcode >> 4)?;
         Ok(())
     }
 
     fn inc_r16(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x03 => {
-                trace!("INC BC");
-                self.rf.bc = self.rf.bc.wrapping_add(1);
-            }
-            0x13 => {
-                trace!("INC DE");
-                self.rf.de = self.rf.de.wrapping_add(1);
-            }
-            0x23 => {
-                trace!("INC HL");
-                self.rf.hl = self.rf.hl.wrapping_add(1);
-            }
-            0x33 => {
-                trace!("INC SP");
-                self.rf.sp = self.rf.sp.wrapping_add(1);
-            }
-            _ => unreachable!(),
-        };
+        let reg = opcode >> 4;
+        trace!("INC {}", Self::get_r16_name(reg));
+        self.set_r16(reg, self.get_r16(reg).wrapping_add(1));
         Ok(())
     }
 
     fn inc_r8(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x0c => {
-                trace!("INC C");
-                let [b, c] = self.rf.bc.to_le_bytes();
-                let new_c = c.wrapping_add(1);
+        let reg = opcode >> 3;
+        trace!("INC {}", Self::get_r8_name(reg));
 
-                self.rf.bc = u16::from_le_bytes([b, new_c]);
+        let n = self.get_r8(reg)?;
+        let new_n = n.wrapping_add(1);
+        self.set_r8(reg, new_n)?;
 
-                self.rf.f.set(Flags::H, ((c ^ 1 ^ new_c ) & 0x10) == 0x10);
-                self.rf.f.set(Flags::N, false);
-                self.rf.f.set(Flags::Z, new_c == 0);
-            }
-            0x13 => todo!(),
-            0x23 => todo!(),
-            0x33 => todo!(),
-            _ => unreachable!(),
-        };
+        self.rf.f.set(Flags::H, ((n ^ 1 ^ new_n) & 0x10) == 0x10);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.set(Flags::Z, new_n == 0);
+
         Ok(())
     }
 
     fn ld_r8_imm8(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x06 => {
-                let n = self.read_pc_inc()?;
-                trace!("LD B,{n:#x}");
-                self.rf.bc = u16::from_le_bytes([self.rf.bc.to_le_bytes()[0], n])
-            }
-            0x0e => {
-                let n = self.read_pc_inc()?;
-                trace!("LD C,{n:#x}");
-                self.rf.bc = u16::from_le_bytes([n, self.rf.bc.to_le_bytes()[1]])
-            }
-            0x16 => todo!(),
-            0x1e => todo!(),
-            0x26 => todo!(),
-            0x2e => todo!(),
-            0x36 => todo!(),
-            0x3e => {
-                let n = self.read_pc_inc()?;
-                trace!("LD A,{n:#x}");
-                self.rf.a = n;
-            }
-            _ => unreachable!(),
-        };
-        Ok(())
+        let n = self.read_pc_inc()?;
+        let reg = opcode >> 3;
+        trace!("LD {},{n:#x}", Self::get_r8_name(opcode >> 3));
+        self.set_r8(reg, n)
     }
 
     fn rla(&mut self, _opcode: u8) -> Result<()> {
@@ -515,9 +615,9 @@ impl<'rom> SimpleDmg<'rom> {
         let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
         a = a.shl(1) | carry_bit;
 
-        self.rf.f.set(Flags::Z, false);
-        self.rf.f.set(Flags::N, false);
-        self.rf.f.set(Flags::H, false);
+        self.rf.f.remove(Flags::Z);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.remove(Flags::H);
         self.rf.f.set(Flags::C, a7 == 1);
 
         self.rf.a = a;
@@ -546,39 +646,23 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn ld_r8_r8(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x4f => {
-                trace!("LD C,A");
-                self.rf.bc = u16::from_le_bytes([self.rf.a, self.rf.bc.to_le_bytes()[1]]);
-            }
-            0x77 => {
-                trace!("LD (HL),A");
-                self.write(self.rf.hl, self.rf.a)?;
-            }
-            _ => unreachable!(),
-        }
-        Ok(())
+        let r_dst = opcode << 2 >> 5;
+        let r_src = opcode & !0xf8;
+        trace!(
+            "LD {},{}",
+            Self::get_r8_name(r_dst),
+            Self::get_r8_name(r_src)
+        );
+        self.set_r8(r_dst, self.get_r8(r_src)?)
     }
 
     fn xor_a_r8(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0xa8 => todo!(),
-            0xa9 => todo!(),
-            0xaa => todo!(),
-            0xab => todo!(),
-            0xac => todo!(),
-            0xad => todo!(),
-            0xae => todo!(),
-            0xaf => {
-                trace!("XOR A");
-                self.rf.a = 0;
-                self.rf.f.set(Flags::C, false);
-                self.rf.f.set(Flags::H, false);
-                self.rf.f.set(Flags::N, false);
-                self.rf.f.set(Flags::Z, self.rf.a == 0);
-            }
-            _ => unreachable!(),
-        };
+        trace!("XOR {}", Self::get_r8_name(opcode << 5 >> 5));
+        self.rf.a ^= self.get_r8(opcode << 5 >> 5)?;
+        self.rf.f.remove(Flags::C);
+        self.rf.f.remove(Flags::H);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.set(Flags::Z, self.rf.a == 0);
         Ok(())
     }
 
@@ -598,57 +682,47 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn pop_r16stk(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0xc1 => {
-                trace!("POP BC");
-                let lsb = self.read(self.rf.sp)?;
-                self.rf.sp = self.rf.sp.wrapping_add(1);
-                let msb = self.read(self.rf.sp)?;
-                self.rf.sp = self.rf.sp.wrapping_add(1);
-                self.rf.bc = u16::from_le_bytes([lsb, msb]);
-            }
-            _ => unreachable!(),
-        }
+        let reg = opcode << 2 >> 5;
+        trace!("POP {}", Self::get_r16stk_name(reg));
+
+        let lsb = self.read(self.rf.sp)?;
+        self.rf.sp = self.rf.sp.wrapping_add(1);
+        let msb = self.read(self.rf.sp)?;
+        self.rf.sp = self.rf.sp.wrapping_add(1);
+
+        self.set_r16stk(reg, u16::from_be_bytes([msb, lsb]));
+
         Ok(())
     }
 
     fn push_r16stk(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0xc5 => {
-                trace!("PUSH BC");
-                let [bc_lsb, bc_msb] = self.rf.bc.to_le_bytes();
+        let reg = opcode << 2 >> 5;
+        trace!("PUSH {}", Self::get_r16stk_name(reg));
 
-                self.rf.sp = self.rf.sp.wrapping_sub(1);
-                self.write(self.rf.sp, bc_msb)?;
-                self.rf.sp = self.rf.sp.wrapping_sub(1);
-                self.write(self.rf.sp, bc_lsb)?;
-            }
-            _ => unreachable!(),
-        }
-        Ok(())
+        let [r_msb, r_lsb] = self.get_r16stk(reg).to_be_bytes();
+        self.rf.sp = self.rf.sp.wrapping_sub(1);
+        self.write(self.rf.sp, r_msb)?;
+        self.rf.sp = self.rf.sp.wrapping_sub(1);
+        self.write(self.rf.sp, r_lsb)
     }
 
     fn ld_cmem_a(&mut self, _opcode: u8) -> Result<()> {
         trace!("LDH (C),A");
-        let [c, _] = self.rf.bc.to_le_bytes();
-        let address = u16::from_le_bytes([c, 0xff]);
-        self.write(address, self.rf.a)?;
-        Ok(())
+        let address = u16::from_be_bytes([0xff, self.rf.c]);
+        self.write(address, self.rf.a)
     }
 
     fn ld_imm8mem_a(&mut self, _opcode: u8) -> Result<()> {
         let n = self.read_pc_inc()?;
-        let address = u16::from_le_bytes([n, 0xff]);
-        self.write(address, self.rf.a)?;
         trace!("LDH ({n:#x}),A");
-        Ok(())
+        let address = u16::from_be_bytes([0xff, n]);
+        self.write(address, self.rf.a)
     }
 
     fn ld_a_imm16mem(&mut self, _opcode: u8) -> Result<()> {
         let nn = self.consume_16bit_direct()?;
-        let data = self.read(nn)?;
-        self.rf.a = data;
         trace!("LD A,({nn:#x})");
+        self.rf.a = self.read(nn)?;
         Ok(())
     }
 
@@ -657,42 +731,35 @@ impl<'rom> SimpleDmg<'rom> {
      */
 
     fn rl_r8(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x11 => {
-                trace!("RL C");
-                let [mut c, b] = self.rf.bc.to_le_bytes();
+        let reg = opcode & !0x10;
+        trace!("RL, {}", Self::get_r8_name(reg));
 
-                let c7 = c & 0b10000000;
-                let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
-                c = c.shl(1) | carry_bit;
+        let mut curr = self.get_r8(reg)?;
+        let curr7 = curr & 0b10000000;
+        let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
+        curr = curr.shl(1) | carry_bit;
 
-                self.rf.f.set(Flags::Z, c == 0);
-                self.rf.f.set(Flags::N, false);
-                self.rf.f.set(Flags::H, false);
-                self.rf.f.set(Flags::C, c7 == 1);
+        self.rf.f.set(Flags::Z, curr == 0);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.remove(Flags::H);
+        self.rf.f.set(Flags::C, curr7 == 1);
 
-                self.rf.bc = u16::from_le_bytes([c, b]);
-            }
-            _ => unreachable!(),
-        }
-
-        Ok(())
+        self.set_r8(reg, curr)
     }
 
     fn bit_b3_r8(&mut self, opcode: u8) -> Result<()> {
-        match opcode {
-            0x7c => {
-                trace!("BIT 7,H");
-                if self.rf.hl.to_le_bytes()[1] & 0b10000000 == 0 {
-                    self.rf.f.insert(Flags::Z);
-                } else {
-                    self.rf.f.remove(Flags::Z);
-                };
-                self.rf.f.remove(Flags::N);
-                self.rf.f.insert(Flags::H);
-            }
-            _ => unreachable!(),
+        let bit = opcode << 2 >> 5;
+        let reg = opcode & !0xf8;
+
+        trace!("BIT {bit},{}", Self::get_r8_name(reg));
+        if self.get_r8(reg)? & (1 << bit) == 0 {
+            self.rf.f.insert(Flags::Z);
+        } else {
+            self.rf.f.remove(Flags::Z);
         }
+
+        self.rf.f.remove(Flags::N);
+        self.rf.f.insert(Flags::H);
         Ok(())
     }
 }
