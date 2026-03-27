@@ -22,7 +22,6 @@ fn main() -> Result<()> {
 
     let mut boot_rom = [0; 256];
     File::open(&args.boot_rom)?.read_exact(&mut boot_rom)?;
-    debug!("{:#x?}", &boot_rom);
 
     let rom = {
         let mut buf = vec![];
@@ -456,7 +455,7 @@ impl<'rom> SimpleDmg<'rom> {
                 break;
             }
 
-            // Special prefix to signal the altenrate set of opcodes
+            // Special prefix to signal the alternate set of opcodes
             if opcode == 0xcb {
                 cb_prefix = true;
                 continue;
@@ -481,13 +480,13 @@ impl<'rom> SimpleDmg<'rom> {
     #[rustfmt::skip]
     const OPCODES: [Option<OpcodeFn<'rom>>; 256] = [
         // 0x00-0x0f
-        Some(Self::nop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
+        Some(Self::nop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, Some(Self::dec_r8), Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), None, Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
-        Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, Some(Self::rla), None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, Some(Self::dec_r8), None, Some(Self::rla), None, None, Some(Self::ld_a_r16mem), None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
-        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, Some(Self::dec_r8), None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x30-0x3f
-        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
+        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), None, Some(Self::dec_r8), None, None, None, None, None, None, None, None, Some(Self::ld_r8_imm8), None,
         // 0x40-0x4f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::ld_r8_r8),
         // 0x50-0x5f
@@ -594,6 +593,23 @@ impl<'rom> SimpleDmg<'rom> {
         self.set_r8(reg, new_n)?;
 
         self.rf.f.set(Flags::H, ((n ^ 1 ^ new_n) & 0x10) == 0x10);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.set(Flags::Z, new_n == 0);
+
+        Ok(())
+    }
+
+    fn dec_r8(&mut self, opcode: u8) -> Result<()> {
+        let reg = opcode >> 3;
+        trace!("DEC {}", Self::get_r8_name(reg));
+
+        let n = self.get_r8(reg)?;
+        let new_n = n.wrapping_sub(1);
+        self.set_r8(reg, new_n)?;
+
+        self.rf
+            .f
+            .set(Flags::H, (((n & 0xf) - (1 & 0xf)) & 0x10) == 0x10);
         self.rf.f.remove(Flags::N);
         self.rf.f.set(Flags::Z, new_n == 0);
 
