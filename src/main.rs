@@ -504,7 +504,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xb0-0xbf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xc0-0xcf
-        None, Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, None, None, None, None, None, Some(Self::call_imm16), None, None,
+        None, Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, None, Some(Self::ret), None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xe0-0xef
@@ -679,6 +679,17 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.f.remove(Flags::H);
         self.rf.f.remove(Flags::N);
         self.rf.f.set(Flags::Z, self.rf.a == 0);
+        Ok(())
+    }
+
+    fn ret(&mut self, _opcode: u8) -> Result<()> {
+        trace!("RET");
+        let nn_lsb = self.read(self.rf.sp)?;
+        self.rf.sp = self.rf.sp.wrapping_add(1);
+        let nn_msb = self.read(self.rf.sp)?;
+        self.rf.sp = self.rf.sp.wrapping_add(1);
+
+        self.rf.pc = u16::from_le_bytes([nn_lsb, nn_msb]);
         Ok(())
     }
 
