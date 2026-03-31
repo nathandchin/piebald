@@ -2,7 +2,13 @@ mod display;
 
 use display::Display;
 
-use std::{fs::File, io::Read, ops::Shl};
+use std::{
+    fs::File,
+    io::Read,
+    ops::Shl,
+    sync::{Arc, Mutex},
+    thread,
+};
 
 use bitflags::bitflags;
 use clap::Parser;
@@ -31,7 +37,32 @@ fn main() -> Result<()> {
     };
 
     let mut dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
-    dmg.execute()
+    // let vram = Arc::clone(&dmg.vram);
+    let vram = {
+        let mut v = vec![0; VRAM_SIZE as usize];
+        let x = vec![
+            0x3c, 0x7e, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7e, 0x5e, 0x7e, 0x0a, 0x7c, 0x56,
+            0x38, 0x7c,
+        ];
+        v[..x.len()].copy_from_slice(&x);
+        Arc::new(Mutex::new(v))
+    };
+
+    let (rl, thread) = raylib::init()
+        // .size(160 * Display::SCALE_FACTOR, 144 * Display::SCALE_FACTOR)
+        .size(256 * Display::SCALE_FACTOR, 256 * Display::SCALE_FACTOR)
+        .build();
+    let mut display = Display::new(rl, thread);
+
+    // thread::spawn(move || {
+    loop {
+        let x = vram.lock().unwrap();
+        display.update(x.as_ref())?;
+    }
+    // });
+
+    // dmg.execute()
+    Ok(())
 }
 
 #[allow(unused)]
@@ -81,23 +112,29 @@ enum IoRegister {
 #[derive(Debug)]
 struct SimpleDmg<'rom> {
     rf: RegisterFile,
-    vram: Vec<u8>,
+    vram: Arc<Mutex<Vec<u8>>>,
     ram: Vec<u8>, // stores both WRAM banks as well as HRAM
     rom: &'rom [u8],
     boot_rom: &'rom [u8],
     boot_rom_mapped: bool,
     ioreg: [u8; IOREG_SIZE as usize],
-    display: Option<Display>,
 }
 
-const VRAM_START_ADDRESS: u16 = 0x8000;
-const WRAM_START_ADDRESS: u16 = 0xc000;
-const HRAM_START_ADDRESS: u16 = 0xff80;
-const IOREG_START_ADDRESS: u16 = 0xff00;
-const VRAM_SIZE: u16 = 0x2000; // 1 bank
-const WRAM_SIZE: u16 = 0x2000; // 2 banks
-const HRAM_SIZE: u16 = 0x80;
-const IOREG_SIZE: u16 = 0x80;
+const VRAM_START_ADDRESS: usize = 0x8000;
+const VRAM_SIZE: usize = 0x2000; // 1 bank
+const VRAM_TILE_MAP1_START_ADDRESS: usize = 0x9800;
+const VRAM_TILE_MAP1_SIZE: usize = 0x3ff;
+const VRAM_TILE_MAP2_START_ADDRESS: usize = 0x9C00;
+const VRAM_TILE_MAP2_SIZE: usize = 0x3ff;
+
+const WRAM_START_ADDRESS: usize = 0xc000;
+const WRAM_SIZE: usize = 0x2000; // 2 banks
+
+const HRAM_START_ADDRESS: usize = 0xff80;
+const HRAM_SIZE: usize = 0x80;
+
+const IOREG_START_ADDRESS: usize = 0xff00;
+const IOREG_SIZE: usize = 0x80;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -125,12 +162,11 @@ impl<'rom> SimpleDmg<'rom> {
         Self {
             rf: RegisterFile::default(),
             ram,
-            vram: vec![0; usize::from(VRAM_SIZE)],
+            vram: Arc::new(Mutex::new(vec![0; usize::from(VRAM_SIZE)])),
             rom,
             boot_rom,
             boot_rom_mapped: true,
             ioreg: [0; _],
-            display: None,
         }
     }
 
@@ -424,19 +460,23 @@ impl<'rom> SimpleDmg<'rom> {
             0x4000..0x8000 => todo!(),
             // 8 KiB Video RAM (VRAM)
             0x8000..0xA000 => {
-                let actual_addr = usize::from(address - VRAM_START_ADDRESS);
+                let actual_addr = usize::from(address) - VRAM_START_ADDRESS;
                 debug!("Write to VRAM at {address:#x} (={actual_addr:#x})");
-                *self
-                    .vram
-                    .get_mut(actual_addr)
-                    .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
-                Ok(())
+                match self.vram.lock() {
+                    Ok(mut vram) => {
+                        *vram
+                            .get_mut(actual_addr)
+                            .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
+                        Ok(())
+                    }
+                    Err(_) => Err(eyre!("VRAM lock was poisoned")),
+                }
             }
             // 8 KiB External RAM
             0xA000..0xC000 => todo!(),
             // 8 KiB Work RAM (WRAM)
             0xC000..0xE000 => {
-                let actual_addr = usize::from(address - WRAM_START_ADDRESS);
+                let actual_addr = usize::from(address) - WRAM_START_ADDRESS;
                 debug!("Write to WRAM at {address:#x} (={actual_addr:#x})");
                 *self
                     .ram
@@ -452,7 +492,7 @@ impl<'rom> SimpleDmg<'rom> {
             0xFEA0..0xFF00 => Err(eyre!("Invalid write at address {address:#x}")),
             // IO Registers
             0xFF00..0xFF80 => {
-                let actual_addr = usize::from(address - IOREG_START_ADDRESS);
+                let actual_addr = usize::from(address) - IOREG_START_ADDRESS;
                 debug!("Write to IO register at {address:#x} (={actual_addr:#x})");
                 self.ioreg[actual_addr] = data;
                 Ok(())
@@ -476,10 +516,6 @@ impl<'rom> SimpleDmg<'rom> {
     fn execute(&mut self) -> Result<()> {
         let mut cb_prefix = false;
         loop {
-            if let Some(d) = &mut self.display {
-                d.update(&self.vram);
-            }
-
             let opcode = self.read_pc_inc()?;
             debug!("pc:{:#x}, opcode:{:#x}", self.rf.pc, opcode);
 
