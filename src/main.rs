@@ -8,6 +8,7 @@ use bitflags::bitflags;
 use clap::Parser;
 use eyre::{OptionExt, Result, eyre};
 use log::{debug, trace};
+use strum_macros::FromRepr;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -60,6 +61,23 @@ struct RegisterFile {
     sp: u16,
 }
 
+#[allow(clippy::upper_case_acronyms)]
+#[repr(u16)]
+#[derive(FromRepr, Copy, Clone, Debug)]
+enum IoRegister {
+    LCDC = 0xff40,
+    LY = 0xff44,
+    LYC = 0xff45,
+    STAT = 0xff41,
+    SCY = 0xff42,
+    SCX = 0xff43,
+    WY = 0xff4a,
+    WX = 0xff4b,
+    BGP = 0xff47,
+    OPB0 = 0xff48,
+    OPB1 = 0xff49,
+}
+
 #[derive(Debug)]
 struct SimpleDmg<'rom> {
     rf: RegisterFile,
@@ -68,15 +86,18 @@ struct SimpleDmg<'rom> {
     rom: &'rom [u8],
     boot_rom: &'rom [u8],
     boot_rom_mapped: bool,
+    ioreg: [u8; IOREG_SIZE as usize],
     display: Option<Display>,
 }
 
 const VRAM_START_ADDRESS: u16 = 0x8000;
 const WRAM_START_ADDRESS: u16 = 0xc000;
 const HRAM_START_ADDRESS: u16 = 0xff80;
+const IOREG_START_ADDRESS: u16 = 0xff00;
 const VRAM_SIZE: u16 = 0x2000; // 1 bank
 const WRAM_SIZE: u16 = 0x2000; // 2 banks
-const HRAM_SIZE: u16 = 0x7f;
+const HRAM_SIZE: u16 = 0x80;
+const IOREG_SIZE: u16 = 0x80;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -108,6 +129,7 @@ impl<'rom> SimpleDmg<'rom> {
             rom,
             boot_rom,
             boot_rom_mapped: true,
+            ioreg: [0; _],
             display: None,
         }
     }
@@ -344,8 +366,17 @@ impl<'rom> SimpleDmg<'rom> {
             0xFE00..0xFEA0 => todo!(),
             // Not Usable
             0xFEA0..0xFF00 => Err(eyre!("Invalid read at address {address:#x}")),
-            // I/O Registers
-            0xFF00..0xFF80 => todo!(),
+            // IO Registers
+            0xFF00..0xFF80 => {
+                if IoRegister::from_repr(address).is_some() {
+                    let actual_addr = usize::from(address) - usize::from(IOREG_START_ADDRESS);
+                    let res = self.ioreg[actual_addr];
+                    debug!("Read {res:#x} from IO register at {address:#x} (={actual_addr:#x})");
+                    Ok(res)
+                } else {
+                    Err(eyre!("Unimplemented IO register: {address:#x}"))
+                }
+            }
             // "High RAM (HRAM)"
             0xFF80..0xFFFF => {
                 let actual_addr =
@@ -419,9 +450,11 @@ impl<'rom> SimpleDmg<'rom> {
             0xFE00..0xFEA0 => todo!(),
             // Not Usable
             0xFEA0..0xFF00 => Err(eyre!("Invalid write at address {address:#x}")),
-            // I/O Registers
+            // IO Registers
             0xFF00..0xFF80 => {
-                debug!("Write to I/O registers at {address:#x}");
+                let actual_addr = usize::from(address - IOREG_START_ADDRESS);
+                debug!("Write to IO register at {address:#x} (={actual_addr:#x})");
+                self.ioreg[actual_addr] = data;
                 Ok(())
             }
             // "High RAM (HRAM)"
@@ -790,7 +823,7 @@ impl<'rom> SimpleDmg<'rom> {
     fn ldh_a_cmem(&mut self, _opcode: u8) -> Result<()> {
         let n = self.read_pc_inc()?;
         trace!("LDH A,({n:#x})");
-        self.rf.a = self.read(dbg!(u16::from_be_bytes([0xff, n])))?;
+        self.rf.a = self.read(u16::from_be_bytes([0xff, n]))?;
         Ok(())
     }
 
