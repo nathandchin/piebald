@@ -48,7 +48,9 @@ fn main() -> Result<()> {
         let mut display = Display::new(rl, thread);
 
         loop {
-            display.update(Arc::clone(&vram), Arc::clone(&ioreg)).unwrap();
+            display
+                .update(Arc::clone(&vram), Arc::clone(&ioreg))
+                .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
     });
@@ -406,8 +408,7 @@ impl<'rom> SimpleDmg<'rom> {
             }
             // "High RAM (HRAM)"
             0xFF80..0xFFFF => {
-                let actual_addr =
-                    usize::from(address) - HRAM_START_ADDRESS + VRAM_SIZE;
+                let actual_addr = usize::from(address) - HRAM_START_ADDRESS + VRAM_SIZE;
                 let res = self.ram.get(actual_addr).copied();
 
                 if let Some(res) = res {
@@ -493,8 +494,7 @@ impl<'rom> SimpleDmg<'rom> {
             }
             // "High RAM (HRAM)"
             0xFF80..0xFFFF => {
-                let actual_addr =
-                    usize::from(address) - HRAM_START_ADDRESS + VRAM_SIZE;
+                let actual_addr = usize::from(address) - HRAM_START_ADDRESS + VRAM_SIZE;
                 debug!("Write {data:#x} to HRAM at {address:#x} (={actual_addr:#x})");
                 *self
                     .ram
@@ -693,7 +693,7 @@ impl<'rom> SimpleDmg<'rom> {
         trace!("RLA");
         let mut a = self.rf.a;
 
-        let a7 = a & 0b10000000;
+        let a7 = (a & 0b10000000) >> 7;
         let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
         a = a.shl(1) | carry_bit;
 
@@ -912,7 +912,7 @@ impl<'rom> SimpleDmg<'rom> {
         trace!("RL {}", Self::get_r8_name(reg));
 
         let mut curr = self.get_r8(reg)?;
-        let curr7 = curr & 0b10000000;
+        let curr7 = (curr & 0b10000000) >> 7;
         let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
         curr = curr.shl(1) | carry_bit;
 
