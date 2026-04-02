@@ -37,6 +37,7 @@ fn main() -> Result<()> {
 
     let mut dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
     let vram = Arc::clone(&dmg.vram);
+    let ioreg = Arc::clone(&dmg.ioreg);
 
     std::thread::spawn(move || {
         let (rl, thread) = raylib::init()
@@ -47,7 +48,7 @@ fn main() -> Result<()> {
         let mut display = Display::new(rl, thread);
 
         loop {
-            display.update(Arc::clone(&vram)).unwrap();
+            display.update(Arc::clone(&vram), Arc::clone(&ioreg)).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
     });
@@ -107,7 +108,7 @@ struct SimpleDmg<'rom> {
     rom: &'rom [u8],
     boot_rom: &'rom [u8],
     boot_rom_mapped: bool,
-    ioreg: [u8; IOREG_SIZE],
+    ioreg: Arc<Mutex<[u8; IOREG_SIZE]>>,
 }
 
 const VRAM_START_ADDRESS: usize = 0x8000;
@@ -156,7 +157,7 @@ impl<'rom> SimpleDmg<'rom> {
             rom,
             boot_rom,
             boot_rom_mapped: true,
-            ioreg: [0; _],
+            ioreg: Arc::new(Mutex::new([0; _])),
         }
     }
 
@@ -396,7 +397,7 @@ impl<'rom> SimpleDmg<'rom> {
             0xFF00..0xFF80 => {
                 if IoRegister::from_repr(address).is_some() {
                     let actual_addr = usize::from(address) - IOREG_START_ADDRESS;
-                    let res = self.ioreg[actual_addr];
+                    let res = Arc::clone(&self.ioreg).lock().unwrap()[actual_addr];
                     debug!("Read {res:#x} from IO register at {address:#x} (={actual_addr:#x})");
                     Ok(res)
                 } else {
@@ -487,7 +488,7 @@ impl<'rom> SimpleDmg<'rom> {
             0xFF00..0xFF80 => {
                 let actual_addr = usize::from(address) - IOREG_START_ADDRESS;
                 debug!("Write {data:#x} to IO register at {address:#x} (={actual_addr:#x})");
-                self.ioreg[actual_addr] = data;
+                Arc::clone(&self.ioreg).lock().unwrap()[actual_addr] = data;
                 Ok(())
             }
             // "High RAM (HRAM)"
@@ -547,7 +548,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x00-0x0f
         Some(Self::nop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
-        Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), None, Some(Self::rla), Some(Self::jr_imm8), None, Some(Self::ld_a_r16mem), None, None, Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
+        Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), Some(Self::rla), Some(Self::jr_imm8), None, Some(Self::ld_a_r16mem), None, None, Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
         Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), None, None, Some(Self::jr_cond_imm8), None, None, None, None, Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x30-0x3f
@@ -567,7 +568,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xa0-0xaf
         None, None, None, None, None, None, None, None, Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8),
         // 0xb0-0xbf
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8),
         // 0xc0-0xcf
         None, Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, None, Some(Self::ret), None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
@@ -775,6 +776,23 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(())
     }
 
+    fn cp_a_r8(&mut self, opcode: u8) -> Result<()> {
+        let reg = opcode & 0x7;
+        trace!("CP {}", Self::get_r8_name(reg));
+        let rhs = self.get_r8(reg)?;
+        let (result, carry) = self.rf.a.overflowing_sub(rhs);
+
+        self.rf.f.set(Flags::Z, result == 0);
+        self.rf.f.insert(Flags::N);
+        self.rf.f.set(
+            Flags::H,
+            (((self.rf.a & 0xf).wrapping_sub(rhs & 0xf)) & 0x10) == 0x10,
+        );
+        self.rf.f.set(Flags::C, carry);
+
+        Ok(())
+    }
+
     fn xor_a_r8(&mut self, opcode: u8) -> Result<()> {
         trace!("XOR {}", Self::get_r8_name(opcode << 5 >> 5));
         self.rf.a ^= self.get_r8(opcode << 5 >> 5)?;
@@ -875,12 +893,6 @@ impl<'rom> SimpleDmg<'rom> {
         let n = self.read_pc_inc()?;
         trace!("LDH A,({n:#x})");
         self.rf.a = self.read(u16::from_be_bytes([0xff, n]))?;
-
-        if n == 0x44 {
-            self.ioreg[IoRegister::LY as usize - IOREG_START_ADDRESS] =
-                self.ioreg[IoRegister::LY as usize - IOREG_START_ADDRESS].wrapping_add(1);
-        }
-
         Ok(())
     }
 

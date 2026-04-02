@@ -4,8 +4,8 @@ use eyre::Result;
 use raylib::prelude::*;
 
 use crate::{
-    VRAM_START_ADDRESS, VRAM_TILE_MAP1_SIZE, VRAM_TILE_MAP1_START_ADDRESS, VRAM_TILE_MAP2_SIZE,
-    VRAM_TILE_MAP2_START_ADDRESS,
+    IOREG_SIZE, IOREG_START_ADDRESS, IoRegister, VRAM_START_ADDRESS, VRAM_TILE_MAP1_SIZE,
+    VRAM_TILE_MAP1_START_ADDRESS, VRAM_TILE_MAP2_SIZE, VRAM_TILE_MAP2_START_ADDRESS,
 };
 
 #[derive(Debug)]
@@ -44,11 +44,7 @@ impl Display {
         }
     }
 
-    fn get_mapped_tiles(
-        map: &[u8],
-        vram: &[u8],
-        mode: TileMapAddressingMode,
-    ) -> Result<Vec<Tile>> {
+    fn get_mapped_tiles(map: &[u8], vram: &[u8], mode: TileMapAddressingMode) -> Result<Vec<Tile>> {
         let mut res = vec![];
 
         for index in map {
@@ -68,7 +64,11 @@ impl Display {
         Ok(res)
     }
 
-    pub fn update(&mut self, vram: Arc<Mutex<Vec<u8>>>) -> Result<()> {
+    pub fn update(
+        &mut self,
+        vram: Arc<Mutex<Vec<u8>>>,
+        ioreg: Arc<Mutex<[u8; IOREG_SIZE]>>,
+    ) -> Result<()> {
         // let map1 = &vram[VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS..VRAM_TILE_MAP1_SIZE];
         // let map2 = &vram[VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS..VRAM_TILE_MAP2_SIZE];
 
@@ -83,6 +83,7 @@ impl Display {
                 &vram[map2_start..map2_start + VRAM_TILE_MAP2_SIZE],
             ]
             .concat();
+            eprintln!("vram: {:?}", &vram);
             eprintln!("tile_maps: {:?}", &tile_maps);
             let tiles = Self::get_mapped_tiles(&tile_maps, &vram, TileMapAddressingMode::Unsigned)?;
             eprintln!("tiles: {:?}", &tiles);
@@ -95,6 +96,9 @@ impl Display {
 
         for (tile_idx, tile) in tiles.iter().enumerate() {
             for (line_idx, line) in tile.get_pixels().iter().enumerate() {
+                let mut ioreg = ioreg.lock().unwrap();
+                ioreg[IoRegister::LY as usize - IOREG_START_ADDRESS] =
+                    (ioreg[IoRegister::LY as usize - IOREG_START_ADDRESS] + 1) % 153;
                 for (pixel_idx, pixel) in line.iter().enumerate() {
                     let color = Self::PALETTE[usize::from(*pixel)];
                     let x = (pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
