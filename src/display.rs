@@ -1,10 +1,10 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use eyre::Result;
 use raylib::prelude::*;
 
 use crate::{
-    IOREG_SIZE, IOREG_START_ADDRESS, IoRegister, VRAM_START_ADDRESS, VRAM_TILE_MAP1_SIZE,
+    IoRegisterOffset, IoRegisters, VRAM_START_ADDRESS, VRAM_TILE_MAP1_SIZE,
     VRAM_TILE_MAP1_START_ADDRESS, VRAM_TILE_MAP2_SIZE, VRAM_TILE_MAP2_START_ADDRESS,
 };
 
@@ -15,7 +15,6 @@ pub struct Display {
     frame_num: usize,
 }
 
-const TILE_DATA_SIZE: usize = 0x1800;
 const BYTES_PER_TILE: usize = 16;
 const BYTES_PER_LINE: usize = 2;
 const PIXELS_PER_TILE: usize = 8;
@@ -64,18 +63,10 @@ impl Display {
         Ok(res)
     }
 
-    pub fn update(
-        &mut self,
-        vram: Arc<Mutex<Vec<u8>>>,
-        ioreg: Arc<Mutex<[u8; IOREG_SIZE]>>,
-    ) -> Result<()> {
-        // let map1 = &vram[VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS..VRAM_TILE_MAP1_SIZE];
-        // let map2 = &vram[VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS..VRAM_TILE_MAP2_SIZE];
-
+    pub fn update(&mut self, vram: &Mutex<Vec<u8>>, ioreg: &Mutex<IoRegisters>) -> Result<()> {
+        // TODO: deterine addressing mode from LCDC
         let tiles = {
-            eprintln!("[Display] waiting for VRAM lock...");
             let vram = vram.lock().unwrap();
-            eprintln!("[Display] got VRAM lock");
             let map1_start = VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS;
             let map2_start = VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS;
             let tile_maps = [
@@ -83,22 +74,24 @@ impl Display {
                 &vram[map2_start..map2_start + VRAM_TILE_MAP2_SIZE],
             ]
             .concat();
-            eprintln!("vram: {:?}", &vram);
-            eprintln!("tile_maps: {:?}", &tile_maps);
-            let tiles = Self::get_mapped_tiles(&tile_maps, &vram, TileMapAddressingMode::Unsigned)?;
-            eprintln!("tiles: {:?}", &tiles);
-            tiles
+            Self::get_mapped_tiles(&tile_maps, &vram, TileMapAddressingMode::Unsigned)?
         };
 
         let mut d = self.rl.begin_drawing(&self.rt);
         d.clear_background(Color::BLACK);
-        d.draw_text(&self.frame_num.to_string(), 0, 0, 20, Color::RED);
+
+        // TODO: LCDC, LYC, SCY, SCX, etc.
 
         for (tile_idx, tile) in tiles.iter().enumerate() {
             for (line_idx, line) in tile.get_pixels().iter().enumerate() {
-                let mut ioreg = ioreg.lock().unwrap();
-                ioreg[IoRegister::LY as usize - IOREG_START_ADDRESS] =
-                    (ioreg[IoRegister::LY as usize - IOREG_START_ADDRESS] + 1) % 153;
+                // Update IO registers
+                {
+                    // TODO: implement scanlines and fix this mock
+                    let mut ioreg = ioreg.lock().unwrap();
+                    let ly = ioreg.get_reg(IoRegisterOffset::LY);
+                    ioreg.set_reg(IoRegisterOffset::LY, (ly + 1) % 153);
+                }
+
                 for (pixel_idx, pixel) in line.iter().enumerate() {
                     let color = Self::PALETTE[usize::from(*pixel)];
                     let x = (pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
@@ -109,6 +102,11 @@ impl Display {
                     d.draw_rectangle(x, y, Self::SCALE_FACTOR, Self::SCALE_FACTOR, color);
                 }
             }
+        }
+
+        if cfg!(debug_assertions) {
+            d.draw_text(&self.frame_num.to_string(), 10, 10, 20, Color::RED);
+            self.frame_num += 1;
         }
 
         Ok(())

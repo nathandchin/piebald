@@ -36,6 +36,7 @@ fn main() -> Result<()> {
     };
 
     let mut dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
+
     let vram = Arc::clone(&dmg.vram);
     let ioreg = Arc::clone(&dmg.ioreg);
 
@@ -48,10 +49,7 @@ fn main() -> Result<()> {
         let mut display = Display::new(rl, thread);
 
         loop {
-            display
-                .update(Arc::clone(&vram), Arc::clone(&ioreg))
-                .unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(1000));
+            display.update(&vram, &ioreg).unwrap();
         }
     });
 
@@ -88,18 +86,49 @@ struct RegisterFile {
 #[allow(clippy::upper_case_acronyms)]
 #[repr(u16)]
 #[derive(FromRepr, Copy, Clone, Debug)]
-enum IoRegister {
+enum IoRegisterOffset {
+    // Audio
+    NR11 = 0xff11,
+    NR12 = 0xff12,
+    NR13 = 0xff13,
+    NR14 = 0xff14,
+    NR50 = 0xff24,
+    NR51 = 0xff25,
+    NR52 = 0xff26,
+
+    // Display
     LCDC = 0xff40,
-    LY = 0xff44,
-    LYC = 0xff45,
     STAT = 0xff41,
     SCY = 0xff42,
     SCX = 0xff43,
-    WY = 0xff4a,
-    WX = 0xff4b,
+    LY = 0xff44,
+    LYC = 0xff45,
     BGP = 0xff47,
     OPB0 = 0xff48,
     OPB1 = 0xff49,
+    WY = 0xff4a,
+    WX = 0xff4b,
+}
+
+#[derive(Clone, Debug)]
+struct IoRegisters {
+    dat: [u8; IOREG_SIZE],
+}
+
+impl IoRegisters {
+    fn new() -> Self {
+        Self {
+            dat: [0; IOREG_SIZE],
+        }
+    }
+
+    fn get_reg(&self, reg: IoRegisterOffset) -> u8 {
+        self.dat[reg as usize - IOREG_START_ADDRESS]
+    }
+
+    fn set_reg(&mut self, reg: IoRegisterOffset, val: u8) {
+        self.dat[reg as usize - IOREG_START_ADDRESS] = val;
+    }
 }
 
 #[derive(Debug)]
@@ -110,7 +139,7 @@ struct SimpleDmg<'rom> {
     rom: &'rom [u8],
     boot_rom: &'rom [u8],
     boot_rom_mapped: bool,
-    ioreg: Arc<Mutex<[u8; IOREG_SIZE]>>,
+    ioreg: Arc<Mutex<IoRegisters>>,
 }
 
 const VRAM_START_ADDRESS: usize = 0x8000;
@@ -159,7 +188,7 @@ impl<'rom> SimpleDmg<'rom> {
             rom,
             boot_rom,
             boot_rom_mapped: true,
-            ioreg: Arc::new(Mutex::new([0; _])),
+            ioreg: Arc::new(Mutex::new(IoRegisters::new())),
         }
     }
 
@@ -397,10 +426,9 @@ impl<'rom> SimpleDmg<'rom> {
             0xFEA0..0xFF00 => Err(eyre!("Invalid read at address {address:#x}")),
             // IO Registers
             0xFF00..0xFF80 => {
-                if IoRegister::from_repr(address).is_some() {
-                    let actual_addr = usize::from(address) - IOREG_START_ADDRESS;
-                    let res = Arc::clone(&self.ioreg).lock().unwrap()[actual_addr];
-                    debug!("Read {res:#x} from IO register at {address:#x} (={actual_addr:#x})");
+                if let Some(reg) = IoRegisterOffset::from_repr(address) {
+                    let res = self.ioreg.lock().unwrap().get_reg(reg);
+                    debug!("Read {res:#x} from IO register at {address:#x}");
                     Ok(res)
                 } else {
                     Err(eyre!("Unimplemented IO register: {address:#x}"))
@@ -454,9 +482,7 @@ impl<'rom> SimpleDmg<'rom> {
             0x8000..0xA000 => {
                 let actual_addr = usize::from(address) - VRAM_START_ADDRESS;
                 debug!("Write {data:#x} to VRAM at {address:#x} (={actual_addr:#x})");
-                eprintln!("[Main] waiting for VRAM lock...");
                 let x = self.vram.lock();
-                eprintln!("[Main] got VRAM lock");
                 match x {
                     Ok(mut vram) => {
                         *vram
@@ -487,10 +513,13 @@ impl<'rom> SimpleDmg<'rom> {
             0xFEA0..0xFF00 => Err(eyre!("Invalid write at address {address:#x}")),
             // IO Registers
             0xFF00..0xFF80 => {
-                let actual_addr = usize::from(address) - IOREG_START_ADDRESS;
-                debug!("Write {data:#x} to IO register at {address:#x} (={actual_addr:#x})");
-                Arc::clone(&self.ioreg).lock().unwrap()[actual_addr] = data;
-                Ok(())
+                if let Some(reg) = IoRegisterOffset::from_repr(address) {
+                    debug!("Write {data:#x} to IO register at {address:#x}");
+                    self.ioreg.lock().unwrap().set_reg(reg, data);
+                    Ok(())
+                } else {
+                    Err(eyre!("Unimplemented IO register: {address:#x}"))
+                }
             }
             // "High RAM (HRAM)"
             0xFF80..0xFFFF => {
@@ -534,10 +563,7 @@ impl<'rom> SimpleDmg<'rom> {
 
             match Self::OPCODES[usize::from(opcode)] {
                 Some(f) => f(self, opcode)?,
-                None => {
-                    todo!("Opcode not yet implemented: {opcode:#x}");
-                    // loop {}
-                }
+                None => todo!("Opcode not yet implemented: {opcode:#x}"),
             };
         }
         Ok(())
