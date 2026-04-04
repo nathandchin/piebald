@@ -2,7 +2,12 @@ mod display;
 
 use display::Display;
 
-use std::{fs::File, io::Read, ops::Shl};
+use std::{
+    fs::File,
+    io::Read,
+    ops::Shl,
+    sync::{Arc, Mutex},
+};
 
 use bitflags::bitflags;
 use clap::Parser;
@@ -31,6 +36,23 @@ fn main() -> Result<()> {
     };
 
     let mut dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
+
+    let vram = Arc::clone(&dmg.vram);
+    let ioreg = Arc::clone(&dmg.ioreg);
+
+    std::thread::spawn(move || {
+        let (rl, thread) = raylib::init()
+            // .size(160 * Display::SCALE_FACTOR, 144 * Display::SCALE_FACTOR)
+            .size(256 * Display::SCALE_FACTOR, 256 * Display::SCALE_FACTOR)
+            .build();
+
+        let mut display = Display::new(rl, thread);
+
+        loop {
+            display.update(&vram, &ioreg).unwrap();
+        }
+    });
+
     dmg.execute()
 }
 
@@ -64,40 +86,77 @@ struct RegisterFile {
 #[allow(clippy::upper_case_acronyms)]
 #[repr(u16)]
 #[derive(FromRepr, Copy, Clone, Debug)]
-enum IoRegister {
+enum IoRegisterOffset {
+    // Audio
+    NR11 = 0xff11,
+    NR12 = 0xff12,
+    NR13 = 0xff13,
+    NR14 = 0xff14,
+    NR50 = 0xff24,
+    NR51 = 0xff25,
+    NR52 = 0xff26,
+
+    // Display
     LCDC = 0xff40,
-    LY = 0xff44,
-    LYC = 0xff45,
     STAT = 0xff41,
     SCY = 0xff42,
     SCX = 0xff43,
-    WY = 0xff4a,
-    WX = 0xff4b,
+    LY = 0xff44,
+    LYC = 0xff45,
     BGP = 0xff47,
     OPB0 = 0xff48,
     OPB1 = 0xff49,
+    WY = 0xff4a,
+    WX = 0xff4b,
+}
+
+#[derive(Clone, Debug)]
+struct IoRegisters {
+    dat: [u8; IOREG_SIZE],
+}
+
+impl IoRegisters {
+    fn new() -> Self {
+        Self {
+            dat: [0; IOREG_SIZE],
+        }
+    }
+
+    fn get_reg(&self, reg: IoRegisterOffset) -> u8 {
+        self.dat[reg as usize - IOREG_START_ADDRESS]
+    }
+
+    fn set_reg(&mut self, reg: IoRegisterOffset, val: u8) {
+        self.dat[reg as usize - IOREG_START_ADDRESS] = val;
+    }
 }
 
 #[derive(Debug)]
 struct SimpleDmg<'rom> {
     rf: RegisterFile,
-    vram: Vec<u8>,
+    vram: Arc<Mutex<Vec<u8>>>,
     ram: Vec<u8>, // stores both WRAM banks as well as HRAM
     rom: &'rom [u8],
     boot_rom: &'rom [u8],
     boot_rom_mapped: bool,
-    ioreg: [u8; IOREG_SIZE as usize],
-    display: Option<Display>,
+    ioreg: Arc<Mutex<IoRegisters>>,
 }
 
-const VRAM_START_ADDRESS: u16 = 0x8000;
-const WRAM_START_ADDRESS: u16 = 0xc000;
-const HRAM_START_ADDRESS: u16 = 0xff80;
-const IOREG_START_ADDRESS: u16 = 0xff00;
-const VRAM_SIZE: u16 = 0x2000; // 1 bank
-const WRAM_SIZE: u16 = 0x2000; // 2 banks
-const HRAM_SIZE: u16 = 0x80;
-const IOREG_SIZE: u16 = 0x80;
+const VRAM_START_ADDRESS: usize = 0x8000;
+const VRAM_SIZE: usize = 0x2000; // 1 bank
+const VRAM_TILE_MAP1_START_ADDRESS: usize = 0x9800;
+const VRAM_TILE_MAP1_SIZE: usize = 0x3ff;
+const VRAM_TILE_MAP2_START_ADDRESS: usize = 0x9C00;
+const VRAM_TILE_MAP2_SIZE: usize = 0x3ff;
+
+const WRAM_START_ADDRESS: usize = 0xc000;
+const WRAM_SIZE: usize = 0x2000; // 2 banks
+
+const HRAM_START_ADDRESS: usize = 0xff80;
+const HRAM_SIZE: usize = 0x80;
+
+const IOREG_START_ADDRESS: usize = 0xff00;
+const IOREG_SIZE: usize = 0x80;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -120,17 +179,16 @@ type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<(), eyre::E
 
 impl<'rom> SimpleDmg<'rom> {
     pub fn new_with_bootrom(boot_rom: &'rom [u8], rom: &'rom [u8]) -> Self {
-        let ram = vec![0; usize::from(WRAM_SIZE + HRAM_SIZE)];
+        let ram = vec![0; WRAM_SIZE + HRAM_SIZE];
 
         Self {
             rf: RegisterFile::default(),
             ram,
-            vram: vec![0; usize::from(VRAM_SIZE)],
+            vram: Arc::new(Mutex::new(vec![0; VRAM_SIZE])),
             rom,
             boot_rom,
             boot_rom_mapped: true,
-            ioreg: [0; _],
-            display: None,
+            ioreg: Arc::new(Mutex::new(IoRegisters::new())),
         }
     }
 
@@ -348,7 +406,7 @@ impl<'rom> SimpleDmg<'rom> {
             0xA000..0xC000 => todo!(),
             // 8 KiB Work RAM (WRAM)
             0xC000..0xE000 => {
-                let actual_addr = usize::from(address) - usize::from(WRAM_START_ADDRESS);
+                let actual_addr = usize::from(address) - WRAM_START_ADDRESS;
                 let res = self.ram.get(actual_addr).copied();
 
                 if let Some(res) = res {
@@ -368,10 +426,9 @@ impl<'rom> SimpleDmg<'rom> {
             0xFEA0..0xFF00 => Err(eyre!("Invalid read at address {address:#x}")),
             // IO Registers
             0xFF00..0xFF80 => {
-                if IoRegister::from_repr(address).is_some() {
-                    let actual_addr = usize::from(address) - usize::from(IOREG_START_ADDRESS);
-                    let res = self.ioreg[actual_addr];
-                    debug!("Read {res:#x} from IO register at {address:#x} (={actual_addr:#x})");
+                if let Some(reg) = IoRegisterOffset::from_repr(address) {
+                    let res = self.ioreg.lock().unwrap().get_reg(reg);
+                    debug!("Read {res:#x} from IO register at {address:#x}");
                     Ok(res)
                 } else {
                     Err(eyre!("Unimplemented IO register: {address:#x}"))
@@ -379,8 +436,7 @@ impl<'rom> SimpleDmg<'rom> {
             }
             // "High RAM (HRAM)"
             0xFF80..0xFFFF => {
-                let actual_addr =
-                    usize::from(address) - usize::from(HRAM_START_ADDRESS) + usize::from(VRAM_SIZE);
+                let actual_addr = usize::from(address) - HRAM_START_ADDRESS + VRAM_SIZE;
                 let res = self.ram.get(actual_addr).copied();
 
                 if let Some(res) = res {
@@ -424,20 +480,25 @@ impl<'rom> SimpleDmg<'rom> {
             0x4000..0x8000 => todo!(),
             // 8 KiB Video RAM (VRAM)
             0x8000..0xA000 => {
-                let actual_addr = usize::from(address - VRAM_START_ADDRESS);
-                debug!("Write to VRAM at {address:#x} (={actual_addr:#x})");
-                *self
-                    .vram
-                    .get_mut(actual_addr)
-                    .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
-                Ok(())
+                let actual_addr = usize::from(address) - VRAM_START_ADDRESS;
+                debug!("Write {data:#x} to VRAM at {address:#x} (={actual_addr:#x})");
+                let x = self.vram.lock();
+                match x {
+                    Ok(mut vram) => {
+                        *vram
+                            .get_mut(actual_addr)
+                            .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
+                        Ok(())
+                    }
+                    Err(_) => Err(eyre!("VRAM lock was poisoned")),
+                }
             }
             // 8 KiB External RAM
             0xA000..0xC000 => todo!(),
             // 8 KiB Work RAM (WRAM)
             0xC000..0xE000 => {
-                let actual_addr = usize::from(address - WRAM_START_ADDRESS);
-                debug!("Write to WRAM at {address:#x} (={actual_addr:#x})");
+                let actual_addr = usize::from(address) - WRAM_START_ADDRESS;
+                debug!("Write {data:#x} to WRAM at {address:#x} (={actual_addr:#x})");
                 *self
                     .ram
                     .get_mut(actual_addr)
@@ -452,16 +513,18 @@ impl<'rom> SimpleDmg<'rom> {
             0xFEA0..0xFF00 => Err(eyre!("Invalid write at address {address:#x}")),
             // IO Registers
             0xFF00..0xFF80 => {
-                let actual_addr = usize::from(address - IOREG_START_ADDRESS);
-                debug!("Write to IO register at {address:#x} (={actual_addr:#x})");
-                self.ioreg[actual_addr] = data;
-                Ok(())
+                if let Some(reg) = IoRegisterOffset::from_repr(address) {
+                    debug!("Write {data:#x} to IO register at {address:#x}");
+                    self.ioreg.lock().unwrap().set_reg(reg, data);
+                    Ok(())
+                } else {
+                    Err(eyre!("Unimplemented IO register: {address:#x}"))
+                }
             }
             // "High RAM (HRAM)"
             0xFF80..0xFFFF => {
-                let actual_addr =
-                    usize::from(address) - usize::from(HRAM_START_ADDRESS) + usize::from(VRAM_SIZE);
-                debug!("Write to HRAM at {address:#x} (={actual_addr:#x})");
+                let actual_addr = usize::from(address) - HRAM_START_ADDRESS + VRAM_SIZE;
+                debug!("Write {data:#x} to HRAM at {address:#x} (={actual_addr:#x})");
                 *self
                     .ram
                     .get_mut(actual_addr)
@@ -476,10 +539,6 @@ impl<'rom> SimpleDmg<'rom> {
     fn execute(&mut self) -> Result<()> {
         let mut cb_prefix = false;
         loop {
-            if let Some(d) = &mut self.display {
-                d.update(&self.vram);
-            }
-
             let opcode = self.read_pc_inc()?;
             debug!("pc:{:#x}, opcode:{:#x}", self.rf.pc, opcode);
 
@@ -515,7 +574,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x00-0x0f
         Some(Self::nop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None, None, None, None, None, Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
-        Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), None, Some(Self::rla), Some(Self::jr_imm8), None, Some(Self::ld_a_r16mem), None, None, Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
+        Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), Some(Self::rla), Some(Self::jr_imm8), None, Some(Self::ld_a_r16mem), None, None, Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
         Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), None, None, Some(Self::jr_cond_imm8), None, None, None, None, Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x30-0x3f
@@ -531,11 +590,11 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x80-0x8f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x90-0x9f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), None, None, None, None, None, None, None, None,
         // 0xa0-0xaf
         None, None, None, None, None, None, None, None, Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8),
         // 0xb0-0xbf
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, None, None, None, Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8),
         // 0xc0-0xcf
         None, Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, None, Some(Self::ret), None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
@@ -660,7 +719,7 @@ impl<'rom> SimpleDmg<'rom> {
         trace!("RLA");
         let mut a = self.rf.a;
 
-        let a7 = a & 0b10000000;
+        let a7 = (a & 0b10000000) >> 7;
         let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
         a = a.shl(1) | carry_bit;
 
@@ -722,6 +781,42 @@ impl<'rom> SimpleDmg<'rom> {
             Self::get_r8_name(r_src)
         );
         self.set_r8(r_dst, self.get_r8(r_src)?)
+    }
+
+    fn sub_a_r8(&mut self, opcode: u8) -> Result<()> {
+        let reg = opcode & 0x7;
+        trace!("SUB A,{}", Self::get_r8_name(reg));
+        let rhs = self.get_r8(reg)?;
+        let (result, carry) = self.rf.a.overflowing_sub(rhs);
+
+        self.rf.a = result;
+
+        self.rf.f.set(Flags::Z, result == 0);
+        self.rf.f.insert(Flags::N);
+        self.rf.f.set(
+            Flags::H,
+            (((self.rf.a & 0xf).wrapping_sub(rhs & 0xf)) & 0x10) == 0x10,
+        );
+        self.rf.f.set(Flags::C, carry);
+
+        Ok(())
+    }
+
+    fn cp_a_r8(&mut self, opcode: u8) -> Result<()> {
+        let reg = opcode & 0x7;
+        trace!("CP {}", Self::get_r8_name(reg));
+        let rhs = self.get_r8(reg)?;
+        let (result, carry) = self.rf.a.overflowing_sub(rhs);
+
+        self.rf.f.set(Flags::Z, result == 0);
+        self.rf.f.insert(Flags::N);
+        self.rf.f.set(
+            Flags::H,
+            (((self.rf.a & 0xf).wrapping_sub(rhs & 0xf)) & 0x10) == 0x10,
+        );
+        self.rf.f.set(Flags::C, carry);
+
+        Ok(())
     }
 
     fn xor_a_r8(&mut self, opcode: u8) -> Result<()> {
@@ -840,10 +935,10 @@ impl<'rom> SimpleDmg<'rom> {
 
     fn rl_r8(&mut self, opcode: u8) -> Result<()> {
         let reg = opcode & !0x10;
-        trace!("RL, {}", Self::get_r8_name(reg));
+        trace!("RL {}", Self::get_r8_name(reg));
 
         let mut curr = self.get_r8(reg)?;
-        let curr7 = curr & 0b10000000;
+        let curr7 = (curr & 0b10000000) >> 7;
         let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
         curr = curr.shl(1) | carry_bit;
 
