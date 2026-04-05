@@ -108,6 +108,7 @@ enum IoRegisterOffset {
     OPB1 = 0xff49,
     WY = 0xff4a,
     WX = 0xff4b,
+    BANK = 0xff50,
 }
 
 #[derive(Clone, Debug)]
@@ -588,7 +589,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x70-0x7f
         Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), None, Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8),
         // 0x80-0x8f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8), Some(Self::add_a_r8),
         // 0x90-0x9f
         Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), None, None, None, None, None, None, None, None,
         // 0xa0-0xaf
@@ -596,7 +597,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xb0-0xbf
         None, None, None, None, None, None, None, None, Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8),
         // 0xc0-0xcf
-        None, Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, None, Some(Self::ret), None, None, None, Some(Self::call_imm16), None, None,
+        None, Some(Self::pop_r16stk), None, Some(Self::jp_imm16), None, Some(Self::push_r16stk), None, None, None, Some(Self::ret), None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xe0-0xef
@@ -783,6 +784,25 @@ impl<'rom> SimpleDmg<'rom> {
         self.set_r8(r_dst, self.get_r8(r_src)?)
     }
 
+    fn add_a_r8(&mut self, opcode: u8) -> Result<()> {
+        let reg = opcode & 0x7;
+        trace!("ADD A,{}", Self::get_r8_name(reg));
+        let rhs = self.get_r8(reg)?;
+        let (result, carry) = self.rf.a.overflowing_add(rhs);
+
+        self.rf.a = result;
+
+        self.rf.f.set(Flags::Z, result == 0);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.set(
+            Flags::H,
+            (((self.rf.a & 0xf).wrapping_add(rhs & 0xf)) & 0x10) == 0x10,
+        );
+        self.rf.f.set(Flags::C, carry);
+
+        Ok(())
+    }
+
     fn sub_a_r8(&mut self, opcode: u8) -> Result<()> {
         let reg = opcode & 0x7;
         trace!("SUB A,{}", Self::get_r8_name(reg));
@@ -853,6 +873,13 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.sp = self.rf.sp.wrapping_add(1);
 
         self.rf.pc = u16::from_le_bytes([nn_lsb, nn_msb]);
+        Ok(())
+    }
+
+    fn jp_imm16(&mut self, _opcode: u8) -> Result<()> {
+        let nn = self.consume_16bit_direct()?;
+            trace!("JP {nn:#x}");
+        self.rf.pc = nn;
         Ok(())
     }
 
