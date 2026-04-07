@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use eyre::Result;
 use raylib::prelude::*;
 
@@ -63,10 +61,12 @@ impl Display {
         Ok(res)
     }
 
-    pub fn update(&mut self, vram: &Mutex<Vec<u8>>, ioreg: &Mutex<IoRegisters>) -> Result<()> {
-        // TODO: deterine addressing mode from LCDC
+    pub fn draw_scanline(&mut self, vram: &[u8], ioreg: &mut IoRegisters) -> Result<()> {
+        /* TODO: optimize this instead of doing all the work and throwing away
+         * everything besides the current scanline */
+
+        // TODO: determine addressing mode from LCDC
         let tiles = {
-            let vram = vram.lock().unwrap();
             let map1_start = VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS;
             let map2_start = VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS;
             let tile_maps = [
@@ -74,29 +74,28 @@ impl Display {
                 &vram[map2_start..map2_start + VRAM_TILE_MAP2_SIZE],
             ]
             .concat();
-            Self::get_mapped_tiles(&tile_maps, &vram, TileMapAddressingMode::Unsigned)?
+            Self::get_mapped_tiles(&tile_maps, vram, TileMapAddressingMode::Unsigned)?
         };
 
         let mut d = self.rl.begin_drawing(&self.rt);
-        d.clear_background(Color::BLACK);
 
         // TODO: LCDC, LYC, SCY, SCX, etc.
 
+        let curr_scanline = ioreg.get_reg(IoRegisterOffset::LY);
+
         for (tile_idx, tile) in tiles.iter().enumerate() {
             for (line_idx, line) in tile.get_pixels().iter().enumerate() {
-                // Update IO registers
-                {
-                    // TODO: implement scanlines and fix this mock
-                    let mut ioreg = ioreg.lock().unwrap();
-                    let ly = ioreg.get_reg(IoRegisterOffset::LY);
-                    ioreg.set_reg(IoRegisterOffset::LY, (ly + 1) % 153);
+                let scanline = line_idx + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
+                if scanline != curr_scanline.into() {
+                    continue;
                 }
+
+                let y = (line_idx + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
+                    * Self::SCALE_FACTOR;
 
                 for (pixel_idx, pixel) in line.iter().enumerate() {
                     let color = Self::PALETTE[usize::from(*pixel)];
                     let x = (pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
-                        * Self::SCALE_FACTOR;
-                    let y = (line_idx + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
                         * Self::SCALE_FACTOR;
 
                     d.draw_rectangle(x, y, Self::SCALE_FACTOR, Self::SCALE_FACTOR, color);
@@ -105,9 +104,17 @@ impl Display {
         }
 
         if cfg!(debug_assertions) {
-            d.draw_text(&self.frame_num.to_string(), 10, 10, 20, Color::RED);
+            d.draw_text(
+                &format!("Scanline: {}", &self.frame_num),
+                10,
+                10,
+                20,
+                Color::RED,
+            );
             self.frame_num += 1;
         }
+
+        ioreg.set_reg(IoRegisterOffset::LY, (curr_scanline + 1) % 154);
 
         Ok(())
     }
