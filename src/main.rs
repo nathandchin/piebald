@@ -129,12 +129,24 @@ impl Gameboy<'_> {
         const CYCLES_PER_FRAME: usize = 70224 / 154 / 4;
 
         let mut cb_prefix = false;
+        let mut scanline = 0;
+        let mut frame = 0;
+
         loop {
             let _executed_cycles;
             (_executed_cycles, cb_prefix) = self.cpu.run(CYCLES_PER_FRAME, cb_prefix)?;
 
             self.display
-                .draw_scanline(&self.cpu.vram, &mut self.cpu.ioreg)?;
+                .draw_scanline(scanline, frame, &self.cpu.vram, &mut self.cpu.ioreg)?;
+
+            scanline = (scanline + 1) % 154;
+            if scanline < 154 {
+                self.cpu
+                    .ioreg
+                    .set_reg(IoRegisterOffset::LY, scanline.try_into()?);
+            }
+
+            frame += 1;
         }
     }
 }
@@ -153,9 +165,9 @@ struct SimpleDmg<'rom> {
 const VRAM_START_ADDRESS: usize = 0x8000;
 const VRAM_SIZE: usize = 0x2000; // 1 bank
 const VRAM_TILE_MAP1_START_ADDRESS: usize = 0x9800;
-const VRAM_TILE_MAP1_SIZE: usize = 0x3ff;
+const VRAM_TILE_MAP1_SIZE: usize = 0x400;
 const VRAM_TILE_MAP2_START_ADDRESS: usize = 0x9C00;
-const VRAM_TILE_MAP2_SIZE: usize = 0x3ff;
+const VRAM_TILE_MAP2_SIZE: usize = 0x400;
 
 const WRAM_START_ADDRESS: usize = 0xc000;
 const WRAM_SIZE: usize = 0x2000; // 2 banks
