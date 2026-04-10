@@ -2,12 +2,7 @@ mod display;
 
 use display::Display;
 
-use std::{
-    fs::File,
-    io::Read,
-    ops::Shl,
-    sync::{Arc, Mutex},
-};
+use std::{fs::File, io::Read, ops::Shl};
 
 use bitflags::bitflags;
 use clap::Parser;
@@ -23,37 +18,29 @@ struct Args {
 
 fn main() -> Result<()> {
     env_logger::init();
-
     let args = Args::parse();
 
     let mut boot_rom = [0; 256];
     File::open(&args.boot_rom)?.read_exact(&mut boot_rom)?;
-
     let rom = {
         let mut buf = vec![];
         File::open(&args.rom)?.read_to_end(&mut buf)?;
         buf
     };
+    let dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
 
-    let mut dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
+    let (rl, thread) = raylib::init()
+        .size(
+            256 * Display::SCALE_FACTOR as i32,
+            256 * Display::SCALE_FACTOR as i32,
+        )
+        .build();
 
-    let vram = Arc::clone(&dmg.vram);
-    let ioreg = Arc::clone(&dmg.ioreg);
+    let display = Display::new(rl, thread)?;
 
-    std::thread::spawn(move || {
-        let (rl, thread) = raylib::init()
-            // .size(160 * Display::SCALE_FACTOR, 144 * Display::SCALE_FACTOR)
-            .size(256 * Display::SCALE_FACTOR, 256 * Display::SCALE_FACTOR)
-            .build();
+    let mut gb = Gameboy { cpu: dmg, display };
 
-        let mut display = Display::new(rl, thread);
-
-        loop {
-            display.update(&vram, &ioreg).unwrap();
-        }
-    });
-
-    dmg.execute()
+    gb.run()
 }
 
 #[allow(unused)]
@@ -133,22 +120,55 @@ impl IoRegisters {
 }
 
 #[derive(Debug)]
+struct Gameboy<'rom> {
+    cpu: SimpleDmg<'rom>,
+    display: Display,
+}
+
+impl Gameboy<'_> {
+    fn run(&mut self) -> Result<()> {
+        // 70224 dots per frame, 154 scanlines per frame, 4 dots per m-cycle
+        const CYCLES_PER_FRAME: usize = 70224 / 154 / 4;
+
+        let mut cb_prefix = false;
+        let mut frame = 0;
+
+        loop {
+            for scanline in 0..153 {
+                let _executed_cycles;
+                (_executed_cycles, cb_prefix) = self.cpu.run(CYCLES_PER_FRAME, cb_prefix)?;
+
+                self.display
+                    .update_scanline(scanline, &self.cpu.vram, &mut self.cpu.ioreg)?;
+
+                self.cpu
+                    .ioreg
+                    .set_reg(IoRegisterOffset::LY, scanline.try_into()?);
+            }
+
+            self.display.draw(frame)?;
+            frame += 1;
+        }
+    }
+}
+
+#[derive(Debug)]
 struct SimpleDmg<'rom> {
     rf: RegisterFile,
-    vram: Arc<Mutex<Vec<u8>>>,
+    vram: Vec<u8>,
     ram: Vec<u8>, // stores both WRAM banks as well as HRAM
     rom: &'rom [u8],
     boot_rom: &'rom [u8],
     boot_rom_mapped: bool,
-    ioreg: Arc<Mutex<IoRegisters>>,
+    ioreg: IoRegisters,
 }
 
 const VRAM_START_ADDRESS: usize = 0x8000;
 const VRAM_SIZE: usize = 0x2000; // 1 bank
 const VRAM_TILE_MAP1_START_ADDRESS: usize = 0x9800;
-const VRAM_TILE_MAP1_SIZE: usize = 0x3ff;
+const VRAM_TILE_MAP1_SIZE: usize = 0x400;
 const VRAM_TILE_MAP2_START_ADDRESS: usize = 0x9C00;
-const VRAM_TILE_MAP2_SIZE: usize = 0x3ff;
+const VRAM_TILE_MAP2_SIZE: usize = 0x400;
 
 const WRAM_START_ADDRESS: usize = 0xc000;
 const WRAM_SIZE: usize = 0x2000; // 2 banks
@@ -176,7 +196,7 @@ bitflags! {
     }
 }
 
-type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<(), eyre::ErrReport>;
+type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<usize, eyre::ErrReport>;
 
 impl<'rom> SimpleDmg<'rom> {
     pub fn new_with_bootrom(boot_rom: &'rom [u8], rom: &'rom [u8]) -> Self {
@@ -185,11 +205,11 @@ impl<'rom> SimpleDmg<'rom> {
         Self {
             rf: RegisterFile::default(),
             ram,
-            vram: Arc::new(Mutex::new(vec![0; VRAM_SIZE])),
+            vram: vec![0; VRAM_SIZE],
             rom,
             boot_rom,
             boot_rom_mapped: true,
-            ioreg: Arc::new(Mutex::new(IoRegisters::new())),
+            ioreg: IoRegisters::new(),
         }
     }
 
@@ -428,7 +448,7 @@ impl<'rom> SimpleDmg<'rom> {
             // IO Registers
             0xFF00..0xFF80 => {
                 if let Some(reg) = IoRegisterOffset::from_repr(address) {
-                    let res = self.ioreg.lock().unwrap().get_reg(reg);
+                    let res = self.ioreg.get_reg(reg);
                     debug!("Read {res:#x} from IO register at {address:#x}");
                     Ok(res)
                 } else {
@@ -483,16 +503,11 @@ impl<'rom> SimpleDmg<'rom> {
             0x8000..0xA000 => {
                 let actual_addr = usize::from(address) - VRAM_START_ADDRESS;
                 debug!("Write {data:#x} to VRAM at {address:#x} (={actual_addr:#x})");
-                let x = self.vram.lock();
-                match x {
-                    Ok(mut vram) => {
-                        *vram
-                            .get_mut(actual_addr)
-                            .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
-                        Ok(())
-                    }
-                    Err(_) => Err(eyre!("VRAM lock was poisoned")),
-                }
+                *self
+                    .vram
+                    .get_mut(actual_addr)
+                    .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
+                Ok(())
             }
             // 8 KiB External RAM
             0xA000..0xC000 => todo!(),
@@ -516,7 +531,7 @@ impl<'rom> SimpleDmg<'rom> {
             0xFF00..0xFF80 => {
                 if let Some(reg) = IoRegisterOffset::from_repr(address) {
                     debug!("Write {data:#x} to IO register at {address:#x}");
-                    self.ioreg.lock().unwrap().set_reg(reg, data);
+                    self.ioreg.set_reg(reg, data);
                     Ok(())
                 } else {
                     Err(eyre!("Unimplemented IO register: {address:#x}"))
@@ -537,37 +552,38 @@ impl<'rom> SimpleDmg<'rom> {
         }
     }
 
-    fn execute(&mut self) -> Result<()> {
-        let mut cb_prefix = false;
-        loop {
-            let opcode = self.read_pc_inc()?;
-            debug!("pc:{:#x}, opcode:{:#x}", self.rf.pc, opcode);
+    fn run(&mut self, max_cycles: usize, mut cb_prefix: bool) -> Result<(usize, bool)> {
+        let mut cycles = 0;
 
-            // STOP
-            if opcode == 0x10 {
+        loop {
+            if cycles > max_cycles {
                 break;
             }
 
-            // Special prefix to signal the alternate set of opcodes
+            let opcode = self.read_pc_inc()?;
+            debug!("pc:{:#x}, opcode:{:#x}", self.rf.pc, opcode);
+
             if opcode == 0xcb {
                 cb_prefix = true;
+                cycles += 1;
                 continue;
             }
-            if cb_prefix {
+
+            cycles += if cb_prefix {
                 cb_prefix = false;
                 match Self::CB_OPCODES[usize::from(opcode)] {
                     Some(f) => f(self, opcode)?,
                     None => todo!("CB-prefixed opcode not yet implemented: {opcode:#x}"),
-                };
-                continue;
+                }
+            } else {
+                match Self::OPCODES[usize::from(opcode)] {
+                    Some(f) => f(self, opcode)?,
+                    None => todo!("Opcode not yet implemented: {opcode:#x}"),
+                }
             }
-
-            match Self::OPCODES[usize::from(opcode)] {
-                Some(f) => f(self, opcode)?,
-                None => todo!("Opcode not yet implemented: {opcode:#x}"),
-            };
         }
-        Ok(())
+
+        Ok((cycles, cb_prefix))
     }
 
     #[rustfmt::skip]
@@ -603,7 +619,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xe0-0xef
         Some(Self::ldh_imm8mem_a), None, Some(Self::ldh_cmem_a), None, None, None, None, None, None, None, Some(Self::ld_imm16mem_a), None, None, None, None, None,
         // 0xf0-0xff
-        Some(Self::ldh_a_cmem), None, None, None, None, None, None, None, None, None, Some(Self::ld_a_imm16mem), None, None, None, Some(Self::cp_a_imm8), None,
+        Some(Self::ldh_a_imm8mem), None, None, None, None, None, None, None, None, None, Some(Self::ld_a_imm16mem), None, None, None, Some(Self::cp_a_imm8), None,
     ];
 
     #[rustfmt::skip]
@@ -647,37 +663,38 @@ impl<'rom> SimpleDmg<'rom> {
      * https://gbdev.io/pandocs/CPU_Instruction_Set.html
      */
 
-    fn nop(&mut self, _opcode: u8) -> Result<()> {
+    fn nop(&mut self, _opcode: u8) -> Result<usize> {
         trace!("NOP");
-        Ok(())
+        Ok(1)
     }
 
-    fn ld_r16_imm16(&mut self, opcode: u8) -> Result<()> {
+    fn ld_r16_imm16(&mut self, opcode: u8) -> Result<usize> {
         let nn = self.consume_16bit_direct()?;
         trace!("LD {},{nn:#x}", Self::get_r16_name(opcode >> 4));
         self.set_r16(opcode >> 4, nn);
-        Ok(())
+        Ok(3)
     }
 
-    fn ld_r16mem_a(&mut self, opcode: u8) -> Result<()> {
+    fn ld_r16mem_a(&mut self, opcode: u8) -> Result<usize> {
         trace!("LD ({}), A", Self::get_r16mem_name(opcode >> 4));
-        self.set_r16mem(opcode >> 4, self.rf.a)
+        self.set_r16mem(opcode >> 4, self.rf.a)?;
+        Ok(2)
     }
 
-    fn ld_a_r16mem(&mut self, opcode: u8) -> Result<()> {
+    fn ld_a_r16mem(&mut self, opcode: u8) -> Result<usize> {
         trace!("LD A, ({})", Self::get_r16mem_name(opcode >> 4));
         self.rf.a = self.get_r16mem(opcode >> 4)?;
-        Ok(())
+        Ok(2)
     }
 
-    fn inc_r16(&mut self, opcode: u8) -> Result<()> {
+    fn inc_r16(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode >> 4;
         trace!("INC {}", Self::get_r16_name(reg));
         self.set_r16(reg, self.get_r16(reg).wrapping_add(1));
-        Ok(())
+        Ok(2)
     }
 
-    fn inc_r8(&mut self, opcode: u8) -> Result<()> {
+    fn inc_r8(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode >> 3;
         trace!("INC {}", Self::get_r8_name(reg));
 
@@ -689,10 +706,10 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.f.remove(Flags::N);
         self.rf.f.set(Flags::Z, new_n == 0);
 
-        Ok(())
+        Ok(1)
     }
 
-    fn dec_r8(&mut self, opcode: u8) -> Result<()> {
+    fn dec_r8(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode >> 3;
         trace!("DEC {}", Self::get_r8_name(reg));
 
@@ -706,17 +723,18 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.f.remove(Flags::N);
         self.rf.f.set(Flags::Z, new_n == 0);
 
-        Ok(())
+        Ok(1)
     }
 
-    fn ld_r8_imm8(&mut self, opcode: u8) -> Result<()> {
+    fn ld_r8_imm8(&mut self, opcode: u8) -> Result<usize> {
         let n = self.read_pc_inc()?;
         let reg = opcode >> 3;
         trace!("LD {},{n:#x}", Self::get_r8_name(opcode >> 3));
-        self.set_r8(reg, n)
+        self.set_r8(reg, n)?;
+        Ok(2)
     }
 
-    fn rla(&mut self, _opcode: u8) -> Result<()> {
+    fn rla(&mut self, _opcode: u8) -> Result<usize> {
         trace!("RLA");
         let mut a = self.rf.a;
 
@@ -731,17 +749,17 @@ impl<'rom> SimpleDmg<'rom> {
 
         self.rf.a = a;
 
-        Ok(())
+        Ok(1)
     }
 
-    fn jr_imm8(&mut self, _opcode: u8) -> Result<()> {
+    fn jr_imm8(&mut self, _opcode: u8) -> Result<usize> {
         let e = self.read_pc_inc()?.cast_signed();
         trace!("JR {e:#x}");
         self.rf.pc = self.rf.pc.wrapping_add_signed(i16::from(e));
-        Ok(())
+        Ok(3)
     }
 
-    fn jr_cond_imm8(&mut self, opcode: u8) -> Result<()> {
+    fn jr_cond_imm8(&mut self, opcode: u8) -> Result<usize> {
         let e = self.read_pc_inc()?.cast_signed();
 
         trace!(
@@ -764,16 +782,19 @@ impl<'rom> SimpleDmg<'rom> {
         };
         if cond {
             self.rf.pc = self.rf.pc.wrapping_add_signed(i16::from(e));
+            Ok(3)
+        } else {
+            Ok(2)
         }
-        Ok(())
     }
 
-    fn stop(&mut self, _opcode: u8) -> Result<()> {
+    fn stop(&mut self, _opcode: u8) -> Result<usize> {
         trace!("STOP");
         Err(eyre!("STOP encountered"))
+        // todo: 1 tick
     }
 
-    fn ld_r8_r8(&mut self, opcode: u8) -> Result<()> {
+    fn ld_r8_r8(&mut self, opcode: u8) -> Result<usize> {
         let r_dst = opcode << 2 >> 5;
         let r_src = opcode & 0x7;
         trace!(
@@ -781,10 +802,11 @@ impl<'rom> SimpleDmg<'rom> {
             Self::get_r8_name(r_dst),
             Self::get_r8_name(r_src)
         );
-        self.set_r8(r_dst, self.get_r8(r_src)?)
+        self.set_r8(r_dst, self.get_r8(r_src)?)?;
+        Ok(1)
     }
 
-    fn add_a_r8(&mut self, opcode: u8) -> Result<()> {
+    fn add_a_r8(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode & 0x7;
         trace!("ADD A,{}", Self::get_r8_name(reg));
         let rhs = self.get_r8(reg)?;
@@ -800,10 +822,10 @@ impl<'rom> SimpleDmg<'rom> {
         );
         self.rf.f.set(Flags::C, carry);
 
-        Ok(())
+        Ok(1)
     }
 
-    fn sub_a_r8(&mut self, opcode: u8) -> Result<()> {
+    fn sub_a_r8(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode & 0x7;
         trace!("SUB A,{}", Self::get_r8_name(reg));
         let rhs = self.get_r8(reg)?;
@@ -819,10 +841,10 @@ impl<'rom> SimpleDmg<'rom> {
         );
         self.rf.f.set(Flags::C, carry);
 
-        Ok(())
+        Ok(1)
     }
 
-    fn cp_a_r8(&mut self, opcode: u8) -> Result<()> {
+    fn cp_a_r8(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode & 0x7;
         trace!("CP {}", Self::get_r8_name(reg));
         let rhs = self.get_r8(reg)?;
@@ -836,20 +858,20 @@ impl<'rom> SimpleDmg<'rom> {
         );
         self.rf.f.set(Flags::C, carry);
 
-        Ok(())
+        Ok(1)
     }
 
-    fn xor_a_r8(&mut self, opcode: u8) -> Result<()> {
+    fn xor_a_r8(&mut self, opcode: u8) -> Result<usize> {
         trace!("XOR {}", Self::get_r8_name(opcode << 5 >> 5));
         self.rf.a ^= self.get_r8(opcode << 5 >> 5)?;
         self.rf.f.remove(Flags::C);
         self.rf.f.remove(Flags::H);
         self.rf.f.remove(Flags::N);
         self.rf.f.set(Flags::Z, self.rf.a == 0);
-        Ok(())
+        Ok(1)
     }
 
-    fn cp_a_imm8(&mut self, _opcode: u8) -> Result<()> {
+    fn cp_a_imm8(&mut self, _opcode: u8) -> Result<usize> {
         let n = self.read_pc_inc()?;
         trace!("CP {n:#x}");
         let (result, carry) = self.rf.a.overflowing_sub(n);
@@ -862,10 +884,10 @@ impl<'rom> SimpleDmg<'rom> {
         );
         self.rf.f.set(Flags::C, carry);
 
-        Ok(())
+        Ok(2)
     }
 
-    fn ret(&mut self, _opcode: u8) -> Result<()> {
+    fn ret(&mut self, _opcode: u8) -> Result<usize> {
         trace!("RET");
         let nn_lsb = self.read(self.rf.sp)?;
         self.rf.sp = self.rf.sp.wrapping_add(1);
@@ -873,17 +895,17 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.sp = self.rf.sp.wrapping_add(1);
 
         self.rf.pc = u16::from_le_bytes([nn_lsb, nn_msb]);
-        Ok(())
+        Ok(4)
     }
 
-    fn jp_imm16(&mut self, _opcode: u8) -> Result<()> {
+    fn jp_imm16(&mut self, _opcode: u8) -> Result<usize> {
         let nn = self.consume_16bit_direct()?;
-            trace!("JP {nn:#x}");
+        trace!("JP {nn:#x}");
         self.rf.pc = nn;
-        Ok(())
+        Ok(4)
     }
 
-    fn call_imm16(&mut self, _opcode: u8) -> Result<()> {
+    fn call_imm16(&mut self, _opcode: u8) -> Result<usize> {
         let nn = self.consume_16bit_direct()?;
         trace!("CALL {nn:#x}");
         let [pc_lsb, pc_msb] = self.rf.pc.to_le_bytes();
@@ -895,10 +917,10 @@ impl<'rom> SimpleDmg<'rom> {
 
         self.rf.pc = nn;
 
-        Ok(())
+        Ok(6)
     }
 
-    fn pop_r16stk(&mut self, opcode: u8) -> Result<()> {
+    fn pop_r16stk(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode << 2 >> 5;
         trace!("POP {}", Self::get_r16stk_name(reg));
 
@@ -908,11 +930,10 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.sp = self.rf.sp.wrapping_add(1);
 
         self.set_r16stk(reg, u16::from_be_bytes([msb, lsb]));
-
-        Ok(())
+        Ok(3)
     }
 
-    fn push_r16stk(&mut self, opcode: u8) -> Result<()> {
+    fn push_r16stk(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode << 2 >> 5;
         trace!("PUSH {}", Self::get_r16stk_name(reg));
 
@@ -920,47 +941,51 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.sp = self.rf.sp.wrapping_sub(1);
         self.write(self.rf.sp, r_msb)?;
         self.rf.sp = self.rf.sp.wrapping_sub(1);
-        self.write(self.rf.sp, r_lsb)
+        self.write(self.rf.sp, r_lsb)?;
+        Ok(4)
     }
 
-    fn ldh_cmem_a(&mut self, _opcode: u8) -> Result<()> {
+    fn ldh_cmem_a(&mut self, _opcode: u8) -> Result<usize> {
         trace!("LDH (C),A");
         let address = u16::from_be_bytes([0xff, self.rf.c]);
-        self.write(address, self.rf.a)
+        self.write(address, self.rf.a)?;
+        Ok(2)
     }
 
-    fn ldh_imm8mem_a(&mut self, _opcode: u8) -> Result<()> {
+    fn ldh_imm8mem_a(&mut self, _opcode: u8) -> Result<usize> {
         let n = self.read_pc_inc()?;
         trace!("LDH ({n:#x}),A");
         let address = u16::from_be_bytes([0xff, n]);
-        self.write(address, self.rf.a)
+        self.write(address, self.rf.a)?;
+        Ok(3)
     }
 
-    fn ld_imm16mem_a(&mut self, _opcode: u8) -> Result<()> {
+    fn ld_imm16mem_a(&mut self, _opcode: u8) -> Result<usize> {
         let nn = self.consume_16bit_direct()?;
         trace!("LD ({nn:#x}),A");
-        self.write(nn, self.rf.a)
+        self.write(nn, self.rf.a)?;
+        Ok(4)
     }
 
-    fn ldh_a_cmem(&mut self, _opcode: u8) -> Result<()> {
+    fn ldh_a_imm8mem(&mut self, _opcode: u8) -> Result<usize> {
         let n = self.read_pc_inc()?;
         trace!("LDH A,({n:#x})");
         self.rf.a = self.read(u16::from_be_bytes([0xff, n]))?;
-        Ok(())
+        Ok(3)
     }
 
-    fn ld_a_imm16mem(&mut self, _opcode: u8) -> Result<()> {
+    fn ld_a_imm16mem(&mut self, _opcode: u8) -> Result<usize> {
         let nn = self.consume_16bit_direct()?;
         trace!("LD A,({nn:#x})");
         self.rf.a = self.read(nn)?;
-        Ok(())
+        Ok(4)
     }
 
     /*
      * CB prefix opcodes
      */
 
-    fn rl_r8(&mut self, opcode: u8) -> Result<()> {
+    fn rl_r8(&mut self, opcode: u8) -> Result<usize> {
         let reg = opcode & !0x10;
         trace!("RL {}", Self::get_r8_name(reg));
 
@@ -974,10 +999,11 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.f.remove(Flags::H);
         self.rf.f.set(Flags::C, curr7 == 1);
 
-        self.set_r8(reg, curr)
+        self.set_r8(reg, curr)?;
+        Ok(2)
     }
 
-    fn bit_b3_r8(&mut self, opcode: u8) -> Result<()> {
+    fn bit_b3_r8(&mut self, opcode: u8) -> Result<usize> {
         let bit = opcode << 2 >> 5;
         let reg = opcode & !0xf8;
 
@@ -990,6 +1016,6 @@ impl<'rom> SimpleDmg<'rom> {
 
         self.rf.f.remove(Flags::N);
         self.rf.f.insert(Flags::H);
-        Ok(())
+        Ok(2)
     }
 }

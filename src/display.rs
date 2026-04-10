@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use eyre::Result;
 use raylib::prelude::*;
 
@@ -8,105 +6,122 @@ use crate::{
     VRAM_TILE_MAP1_START_ADDRESS, VRAM_TILE_MAP2_SIZE, VRAM_TILE_MAP2_START_ADDRESS,
 };
 
+// Gameboy generic
+const BYTES_PER_TILE: usize = 16;
+const PIXELS_PER_TILE: usize = 8;
+const PIXELS_PER_FULL_SCREEN_ROW: usize = 256;
+const PIXELS_PER_FULL_SCREEN_COL: usize = 256;
+const TILES_PER_ROW: usize = PIXELS_PER_FULL_SCREEN_COL / PIXELS_PER_TILE;
+
+// Specific to this implementation
+const PIXEL_FORMAT: PixelFormat = PixelFormat::PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
+const BYTES_PER_PIXEL: usize = 1;
+
 #[derive(Debug)]
 pub struct Display {
     rl: RaylibHandle,
     rt: RaylibThread,
-    frame_num: usize,
+    pixels: [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL],
+    texture: WeakTexture2D,
 }
-
-const BYTES_PER_TILE: usize = 16;
-const BYTES_PER_LINE: usize = 2;
-const PIXELS_PER_TILE: usize = 8;
-const TILES_PER_ROW: usize = 256 / PIXELS_PER_TILE;
 
 enum TileMapAddressingMode {
     Unsigned,
     Signed,
 }
 
+impl Drop for Display {
+    fn drop(&mut self) {
+        // Not sure about this - investigate more
+        unsafe {
+            self.rl.unload_texture(&self.rt, self.texture.clone());
+        }
+    }
+}
+
 impl Display {
-    pub const SCALE_FACTOR: i32 = 5;
+    pub const SCALE_FACTOR: f32 = 5.0;
 
-    const PALETTE: [Color; 4] = [
-        Color::WHITE,
-        Color::LIGHTGRAY,
-        Color::DARKGRAY,
-        Color::BLACK,
-    ];
+    const PALETTE: [u8; 4] = [0xff, 0x6e, 0xb0, 0x00];
 
-    pub fn new(rl: RaylibHandle, rt: RaylibThread) -> Self {
-        Self {
+    pub fn new(mut rl: RaylibHandle, rt: RaylibThread) -> Result<Self> {
+        let mut image = Image::gen_image_color(
+            PIXELS_PER_FULL_SCREEN_COL as i32,
+            PIXELS_PER_FULL_SCREEN_ROW as i32,
+            Color::WHITE,
+        );
+        image.set_format(PIXEL_FORMAT);
+        let texture = rl.load_texture_from_image(&rt, &image)?;
+        let texture = unsafe { texture.make_weak() };
+
+        Ok(Self {
             rl,
             rt,
-            frame_num: 0,
-        }
+            pixels: [0; _],
+            texture,
+        })
     }
 
-    fn get_mapped_tiles(map: &[u8], vram: &[u8], mode: TileMapAddressingMode) -> Result<Vec<Tile>> {
-        let mut res = vec![];
-
-        for index in map {
-            let start = match mode {
-                TileMapAddressingMode::Unsigned => {
-                    usize::from(index + u8::try_from(0x8000 - VRAM_START_ADDRESS)?)
-                }
-                TileMapAddressingMode::Signed => usize::try_from(
-                    i16::from(*index) + i16::from(i8::try_from(0x8800 - VRAM_START_ADDRESS)?),
-                )?,
-            } * BYTES_PER_TILE;
-            let mut bytes = [0; 16];
-            bytes.copy_from_slice(&vram[start..start + 16]);
-            res.push(Tile { bytes })
-        }
-
-        Ok(res)
-    }
-
-    pub fn update(&mut self, vram: &Mutex<Vec<u8>>, ioreg: &Mutex<IoRegisters>) -> Result<()> {
-        // TODO: deterine addressing mode from LCDC
-        let tiles = {
-            let vram = vram.lock().unwrap();
-            let map1_start = VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS;
-            let map2_start = VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS;
-            let tile_maps = [
-                &vram[map1_start..map1_start + VRAM_TILE_MAP1_SIZE],
-                &vram[map2_start..map2_start + VRAM_TILE_MAP2_SIZE],
-            ]
-            .concat();
-            Self::get_mapped_tiles(&tile_maps, &vram, TileMapAddressingMode::Unsigned)?
-        };
-
+    pub fn draw(&mut self, frame: usize) -> Result<()> {
         let mut d = self.rl.begin_drawing(&self.rt);
-        d.clear_background(Color::BLACK);
-
-        // TODO: LCDC, LYC, SCY, SCX, etc.
-
-        for (tile_idx, tile) in tiles.iter().enumerate() {
-            for (line_idx, line) in tile.get_pixels().iter().enumerate() {
-                // Update IO registers
-                {
-                    // TODO: implement scanlines and fix this mock
-                    let mut ioreg = ioreg.lock().unwrap();
-                    let ly = ioreg.get_reg(IoRegisterOffset::LY);
-                    ioreg.set_reg(IoRegisterOffset::LY, (ly + 1) % 153);
-                }
-
-                for (pixel_idx, pixel) in line.iter().enumerate() {
-                    let color = Self::PALETTE[usize::from(*pixel)];
-                    let x = (pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
-                        * Self::SCALE_FACTOR;
-                    let y = (line_idx + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
-                        * Self::SCALE_FACTOR;
-
-                    d.draw_rectangle(x, y, Self::SCALE_FACTOR, Self::SCALE_FACTOR, color);
-                }
-            }
-        }
+        self.texture.update_texture(&self.pixels)?;
+        d.draw_texture_ex(
+            &self.texture,
+            Vector2::zero(),
+            0.0,
+            Self::SCALE_FACTOR,
+            Color::WHITE,
+        );
 
         if cfg!(debug_assertions) {
-            d.draw_text(&self.frame_num.to_string(), 10, 10, 20, Color::RED);
-            self.frame_num += 1;
+            d.draw_text(&format!("Frame: {frame}"), 10, 10, 20, Color::RED);
+        }
+
+        Ok(())
+    }
+
+    pub fn update_scanline(
+        &mut self,
+        scanline: usize,
+        vram: &[u8],
+        ioreg: &mut IoRegisters,
+    ) -> Result<()> {
+        // TODO: dynamically choose this
+        const MODE: TileMapAddressingMode = TileMapAddressingMode::Unsigned;
+
+        let map = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b01000000 == 0b01000000 {
+            &vram[VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS
+                ..VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP2_SIZE]
+        } else {
+            &vram[VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS
+                ..VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP1_SIZE]
+        };
+
+        let mut tiles = vec![];
+        let start = scanline / PIXELS_PER_TILE * TILES_PER_ROW;
+        let end = start + TILES_PER_ROW;
+
+        let map = &map[start..end];
+
+        // Obtain tiles from tile maps
+        for &mapped_tile_index in map {
+            tiles.push(Tile::from_map_index(mapped_tile_index, vram, MODE)?);
+        }
+
+        for (tile_idx, tile) in tiles.iter().enumerate() {
+            let y = scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
+            for (pixel_idx, &pixel) in tile
+                .get_line_pixels(scanline % PIXELS_PER_TILE)
+                .iter()
+                .enumerate()
+            {
+                let x = pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE);
+                let color = Self::PALETTE[usize::from(pixel)];
+
+                // This is dependent on the chosen PIXEL_FORMAT
+                let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
+                self.pixels[idx] = color;
+            }
         }
 
         Ok(())
@@ -115,28 +130,39 @@ impl Display {
 
 #[derive(Debug)]
 struct Tile {
-    bytes: [u8; 16],
+    bytes: [u8; BYTES_PER_TILE],
 }
 
 impl Tile {
-    fn get_pixels(&self) -> [[u8; 8]; 8] {
-        let mut res = [[0; _]; _];
+    fn from_map_index(map_index: u8, memory: &[u8], mode: TileMapAddressingMode) -> Result<Self> {
+        let start = match mode {
+            TileMapAddressingMode::Unsigned => {
+                usize::from(map_index + u8::try_from(0x8000 - VRAM_START_ADDRESS)?)
+            }
+            TileMapAddressingMode::Signed => usize::try_from(
+                i16::from(map_index) + i16::from(i8::try_from(0x8800 - VRAM_START_ADDRESS)?),
+            )?,
+        } * BYTES_PER_TILE;
+        let mut bytes = [0; BYTES_PER_TILE];
+        bytes.copy_from_slice(&memory[start..start + BYTES_PER_TILE]);
 
-        for (i, line) in self.bytes.chunks_exact(BYTES_PER_LINE).enumerate() {
-            let lsb = line[0];
-            let msb = line[1];
-            res[i] = [
-                (lsb & 0b10000000) >> 7 | ((msb & 0b10000000) >> 7) << 1,
-                (lsb & 0b01000000) >> 6 | ((msb & 0b01000000) >> 6) << 1,
-                (lsb & 0b00100000) >> 5 | ((msb & 0b00100000) >> 5) << 1,
-                (lsb & 0b00010000) >> 4 | ((msb & 0b00010000) >> 4) << 1,
-                (lsb & 0b00001000) >> 3 | ((msb & 0b00001000) >> 3) << 1,
-                (lsb & 0b00000100) >> 2 | ((msb & 0b00000100) >> 2) << 1,
-                (lsb & 0b00000010) >> 1 | ((msb & 0b00000010) >> 1) << 1,
-                (lsb & 0b00000001) | (msb & 0b00000001) << 1,
-            ];
-        }
+        Ok(Self { bytes })
+    }
 
-        res
+    fn get_line_pixels(&self, line: usize) -> [u8; 8] {
+        assert!(line * 2 + 1 < BYTES_PER_TILE);
+        let lsb = self.bytes[line * 2];
+        let msb = self.bytes[line * 2 + 1];
+
+        [
+            (lsb & 0b10000000) >> 7 | ((msb & 0b10000000) >> 7) << 1,
+            (lsb & 0b01000000) >> 6 | ((msb & 0b01000000) >> 6) << 1,
+            (lsb & 0b00100000) >> 5 | ((msb & 0b00100000) >> 5) << 1,
+            (lsb & 0b00010000) >> 4 | ((msb & 0b00010000) >> 4) << 1,
+            (lsb & 0b00001000) >> 3 | ((msb & 0b00001000) >> 3) << 1,
+            (lsb & 0b00000100) >> 2 | ((msb & 0b00000100) >> 2) << 1,
+            (lsb & 0b00000010) >> 1 | ((msb & 0b00000010) >> 1) << 1,
+            (lsb & 0b00000001) | (msb & 0b00000001) << 1,
+        ]
     }
 }
