@@ -16,12 +16,18 @@ const TILES_PER_ROW: usize = PIXELS_PER_FULL_SCREEN_COL / PIXELS_PER_TILE;
 // Specific to this implementation
 const PIXEL_FORMAT: PixelFormat = PixelFormat::PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
 const BYTES_PER_PIXEL: usize = 1;
+pub const SCALE_FACTOR: f32 = 5.0;
 
 #[derive(Debug)]
 pub struct Display {
+    pixels: [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL],
+    rend: Option<Renderer>,
+}
+
+#[derive(Debug)]
+struct Renderer {
     rl: RaylibHandle,
     rt: RaylibThread,
-    pixels: [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL],
     texture: WeakTexture2D,
 }
 
@@ -38,7 +44,7 @@ enum TileMapAddressingMode {
     Signed,
 }
 
-impl Drop for Display {
+impl Drop for Renderer {
     fn drop(&mut self) {
         // Not sure about this - investigate more
         unsafe {
@@ -47,37 +53,34 @@ impl Drop for Display {
     }
 }
 
-impl Display {
-    pub const SCALE_FACTOR: f32 = 5.0;
-
-    const PALETTE: [u8; 4] = [0xff, 0x6e, 0xb0, 0x00];
-
-    pub fn new(mut rl: RaylibHandle, rt: RaylibThread) -> Result<Self> {
+impl Renderer {
+    fn new() -> Result<Self> {
+        let (mut rl, thread) = raylib::init()
+            .size(256 * SCALE_FACTOR as i32, 256 * SCALE_FACTOR as i32)
+            .build();
         let mut image = Image::gen_image_color(
             PIXELS_PER_FULL_SCREEN_COL as i32,
             PIXELS_PER_FULL_SCREEN_ROW as i32,
             Color::WHITE,
         );
         image.set_format(PIXEL_FORMAT);
-        let texture = rl.load_texture_from_image(&rt, &image)?;
+        let texture = rl.load_texture_from_image(&thread, &image)?;
         let texture = unsafe { texture.make_weak() };
-
-        Ok(Self {
+        Ok(Renderer {
             rl,
-            rt,
-            pixels: [0; _],
+            rt: thread,
             texture,
         })
     }
 
-    pub fn draw(&mut self, frame: usize) -> Result<()> {
+    fn draw(&mut self, frame: usize, pixels: &[u8]) -> Result<()> {
         let mut d = self.rl.begin_drawing(&self.rt);
-        self.texture.update_texture(&self.pixels)?;
+        self.texture.update_texture(pixels)?;
         d.draw_texture_ex(
             &self.texture,
             Vector2::zero(),
             0.0,
-            Self::SCALE_FACTOR,
+            SCALE_FACTOR,
             Color::WHITE,
         );
 
@@ -86,6 +89,30 @@ impl Display {
         }
 
         Ok(())
+    }
+}
+
+impl Display {
+    const PALETTE: [u8; 4] = [0xff, 0x6e, 0xb0, 0x00];
+
+    pub fn new(do_render: bool) -> Result<Self> {
+        let rend = if do_render {
+            Some(Renderer::new()?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            pixels: [0; _],
+            rend,
+        })
+    }
+
+    pub fn draw(&mut self, frame: usize) -> Result<()> {
+        match self.rend.as_mut() {
+            Some(rend) => rend.draw(frame, &self.pixels),
+            None => Ok(()),
+        }
     }
 
     pub fn update_scanline(
@@ -115,7 +142,8 @@ impl Display {
             &tile_map[start..end]
         };
 
-        tile_map.iter()
+        tile_map
+            .iter()
             // Map list of tile indices -> list of tile structs
             .flat_map(|&tile_idx| {
                 Tile::from_map_index(tile_idx, vram, TileIdType::Object, addressing_mode)

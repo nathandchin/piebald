@@ -14,6 +14,9 @@ use strum_macros::FromRepr;
 struct Args {
     boot_rom: String,
     rom: String,
+
+    #[arg(short = 'n', long, default_value_t = false)]
+    no_graphic: bool,
 }
 
 fn main() -> Result<()> {
@@ -28,15 +31,7 @@ fn main() -> Result<()> {
         buf
     };
     let dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
-
-    let (rl, thread) = raylib::init()
-        .size(
-            256 * Display::SCALE_FACTOR as i32,
-            256 * Display::SCALE_FACTOR as i32,
-        )
-        .build();
-
-    let display = Display::new(rl, thread)?;
+    let display = Display::new(!args.no_graphic)?;
 
     let mut gb = Gameboy { cpu: dmg, display };
 
