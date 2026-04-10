@@ -30,11 +30,13 @@ fn main() -> Result<()> {
     let dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
 
     let (rl, thread) = raylib::init()
-        // .size(160 * Display::SCALE_FACTOR, 144 * Display::SCALE_FACTOR)
-        .size(256 * Display::SCALE_FACTOR, 256 * Display::SCALE_FACTOR)
+        .size(
+            256 * Display::SCALE_FACTOR as i32,
+            256 * Display::SCALE_FACTOR as i32,
+        )
         .build();
 
-    let display = Display::new(rl, thread);
+    let display = Display::new(rl, thread)?;
 
     let mut gb = Gameboy { cpu: dmg, display };
 

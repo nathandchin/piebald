@@ -6,17 +6,24 @@ use crate::{
     VRAM_TILE_MAP1_START_ADDRESS, VRAM_TILE_MAP2_SIZE, VRAM_TILE_MAP2_START_ADDRESS,
 };
 
+// Gameboy generic
+const BYTES_PER_TILE: usize = 16;
+const PIXELS_PER_TILE: usize = 8;
+const PIXELS_PER_FULL_SCREEN_ROW: usize = 256;
+const PIXELS_PER_FULL_SCREEN_COL: usize = 256;
+const TILES_PER_ROW: usize = PIXELS_PER_FULL_SCREEN_COL / PIXELS_PER_TILE;
+
+// Specific to this implementation
+const PIXEL_FORMAT: PixelFormat = PixelFormat::PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
+const BYTES_PER_PIXEL: usize = 1;
+
 #[derive(Debug)]
 pub struct Display {
     rl: RaylibHandle,
     rt: RaylibThread,
-    frame: Image,
+    pixels: [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL],
+    texture: Texture2D,
 }
-
-const BYTES_PER_TILE: usize = 16;
-const PIXELS_PER_TILE: usize = 8;
-const PIXELS_PER_FULL_SCREEN_COL: usize = 256;
-const TILES_PER_ROW: usize = PIXELS_PER_FULL_SCREEN_COL / PIXELS_PER_TILE;
 
 enum TileMapAddressingMode {
     Unsigned,
@@ -24,18 +31,25 @@ enum TileMapAddressingMode {
 }
 
 impl Display {
-    pub const SCALE_FACTOR: i32 = 5;
+    pub const SCALE_FACTOR: f32 = 5.0;
 
-    const PALETTE: [Color; 4] = [
-        Color::WHITE,
-        Color::LIGHTGRAY,
-        Color::DARKGRAY,
-        Color::BLACK,
-    ];
+    const PALETTE: [u8; 4] = [0xff, 0x6e, 0xb0, 0x00];
 
-    pub fn new(rl: RaylibHandle, rt: RaylibThread) -> Self {
-        let frame = rl.load_image_from_screen(&rt);
-        Self { rl, rt, frame }
+    pub fn new(mut rl: RaylibHandle, rt: RaylibThread) -> Result<Self> {
+        let mut image = Image::gen_image_color(
+            PIXELS_PER_FULL_SCREEN_COL as i32,
+            PIXELS_PER_FULL_SCREEN_ROW as i32,
+            Color::WHITE,
+        );
+        image.set_format(PIXEL_FORMAT);
+        let texture = rl.load_texture_from_image(&rt, &image)?;
+
+        Ok(Self {
+            rl,
+            rt,
+            pixels: [0; _],
+            texture,
+        })
     }
 
     pub fn draw_scanline(
@@ -68,28 +82,30 @@ impl Display {
         }
 
         for (tile_idx, tile) in tiles.iter().enumerate() {
-            let y = (scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
-                * Self::SCALE_FACTOR;
+            let y = scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
             for (pixel_idx, &pixel) in tile
                 .get_line_pixels(scanline % PIXELS_PER_TILE)
                 .iter()
                 .enumerate()
             {
-                let x = (pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
-                    * Self::SCALE_FACTOR;
+                let x = pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE);
                 let color = Self::PALETTE[usize::from(pixel)];
-                self.frame
-                    .draw_rectangle(x, y, Self::SCALE_FACTOR, Self::SCALE_FACTOR, color);
+
+                // This is dependent on the chosen PIXEL_FORMAT
+                let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
+                self.pixels[idx] = color;
             }
         }
 
-        let texture = self
-            .rl
-            .load_texture_from_image(&self.rt, &self.frame)
-            .unwrap();
-
         let mut d = self.rl.begin_drawing(&self.rt);
-        d.draw_texture(&texture, 0, 0, Color::WHITE);
+        self.texture.update_texture(&self.pixels)?;
+        d.draw_texture_ex(
+            &self.texture,
+            Vector2::zero(),
+            0.0,
+            Self::SCALE_FACTOR,
+            Color::WHITE,
+        );
 
         if cfg!(debug_assertions) {
             d.draw_text(&format!("Frame: {frame}"), 10, 10, 20, Color::RED);
