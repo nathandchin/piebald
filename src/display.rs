@@ -22,12 +22,21 @@ pub struct Display {
     rl: RaylibHandle,
     rt: RaylibThread,
     pixels: [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL],
-    texture: Texture2D,
+    texture: WeakTexture2D,
 }
 
 enum TileMapAddressingMode {
     Unsigned,
     Signed,
+}
+
+impl Drop for Display {
+    fn drop(&mut self) {
+        // Not sure about this - investigate more
+        unsafe {
+            self.rl.unload_texture(&self.rt, self.texture.clone());
+        }
+    }
 }
 
 impl Display {
@@ -43,6 +52,7 @@ impl Display {
         );
         image.set_format(PIXEL_FORMAT);
         let texture = rl.load_texture_from_image(&rt, &image)?;
+        let texture = unsafe { texture.make_weak() };
 
         Ok(Self {
             rl,
