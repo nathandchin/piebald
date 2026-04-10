@@ -25,6 +25,13 @@ pub struct Display {
     texture: WeakTexture2D,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum TileIdType {
+    Object,
+    BackgroundWindow,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum TileMapAddressingMode {
     Unsigned,
     Signed,
@@ -86,9 +93,6 @@ impl Display {
         vram: &[u8],
         ioreg: &mut IoRegisters,
     ) -> Result<()> {
-        // TODO: dynamically choose this
-        const MODE: TileMapAddressingMode = TileMapAddressingMode::Unsigned;
-
         let map = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b01000000 == 0b01000000 {
             &vram[VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS
                 ..VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP2_SIZE]
@@ -104,8 +108,18 @@ impl Display {
         let map = &map[start..end];
 
         // Obtain tiles from tile maps
+        let mode = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b00010000 == 0b00010000 {
+            TileMapAddressingMode::Unsigned
+        } else {
+            TileMapAddressingMode::Signed
+        };
         for &mapped_tile_index in map {
-            tiles.push(Tile::from_map_index(mapped_tile_index, vram, MODE)?);
+            tiles.push(Tile::from_map_index(
+                mapped_tile_index,
+                vram,
+                TileIdType::Object,
+                mode,
+            )?);
         }
 
         for (tile_idx, tile) in tiles.iter().enumerate() {
@@ -134,14 +148,18 @@ struct Tile {
 }
 
 impl Tile {
-    fn from_map_index(map_index: u8, memory: &[u8], mode: TileMapAddressingMode) -> Result<Self> {
-        let start = match mode {
-            TileMapAddressingMode::Unsigned => {
-                usize::from(map_index + u8::try_from(0x8000 - VRAM_START_ADDRESS)?)
-            }
-            TileMapAddressingMode::Signed => usize::try_from(
-                i16::from(map_index) + i16::from(i8::try_from(0x8800 - VRAM_START_ADDRESS)?),
-            )?,
+    fn from_map_index(
+        map_index: u8,
+        memory: &[u8],
+        tile_type: TileIdType,
+        mode: TileMapAddressingMode,
+    ) -> Result<Self> {
+        let start = if matches!(tile_type, TileIdType::BackgroundWindow)
+            && matches!(mode, TileMapAddressingMode::Signed)
+        {
+            usize::try_from(i16::try_from(0x9000 - VRAM_START_ADDRESS)? + i16::from(map_index))?
+        } else {
+            (0x8000 - VRAM_START_ADDRESS) + usize::from(map_index)
         } * BYTES_PER_TILE;
         let mut bytes = [0; BYTES_PER_TILE];
         bytes.copy_from_slice(&memory[start..start + BYTES_PER_TILE]);
