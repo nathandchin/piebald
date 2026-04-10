@@ -139,12 +139,14 @@ impl Gameboy<'_> {
                 (_executed_cycles, cb_prefix) = self.cpu.run(CYCLES_PER_FRAME, cb_prefix)?;
 
                 self.display
-                    .draw_scanline(scanline, frame, &self.cpu.vram, &mut self.cpu.ioreg)?;
+                    .update_scanline(scanline, &self.cpu.vram, &mut self.cpu.ioreg)?;
 
                 self.cpu
                     .ioreg
                     .set_reg(IoRegisterOffset::LY, scanline.try_into()?);
             }
+
+            self.display.draw(frame)?;
             frame += 1;
         }
     }

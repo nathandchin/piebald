@@ -52,10 +52,27 @@ impl Display {
         })
     }
 
-    pub fn draw_scanline(
+    pub fn draw(&mut self, frame: usize) -> Result<()> {
+        let mut d = self.rl.begin_drawing(&self.rt);
+        self.texture.update_texture(&self.pixels)?;
+        d.draw_texture_ex(
+            &self.texture,
+            Vector2::zero(),
+            0.0,
+            Self::SCALE_FACTOR,
+            Color::WHITE,
+        );
+
+        if cfg!(debug_assertions) {
+            d.draw_text(&format!("Frame: {frame}"), 10, 10, 20, Color::RED);
+        }
+
+        Ok(())
+    }
+
+    pub fn update_scanline(
         &mut self,
         scanline: usize,
-        frame: usize,
         vram: &[u8],
         ioreg: &mut IoRegisters,
     ) -> Result<()> {
@@ -95,20 +112,6 @@ impl Display {
                 let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
                 self.pixels[idx] = color;
             }
-        }
-
-        let mut d = self.rl.begin_drawing(&self.rt);
-        self.texture.update_texture(&self.pixels)?;
-        d.draw_texture_ex(
-            &self.texture,
-            Vector2::zero(),
-            0.0,
-            Self::SCALE_FACTOR,
-            Color::WHITE,
-        );
-
-        if cfg!(debug_assertions) {
-            d.draw_text(&format!("Frame: {frame}"), 10, 10, 20, Color::RED);
         }
 
         Ok(())
