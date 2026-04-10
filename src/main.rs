@@ -129,23 +129,20 @@ impl Gameboy<'_> {
         const CYCLES_PER_FRAME: usize = 70224 / 154 / 4;
 
         let mut cb_prefix = false;
-        let mut scanline = 0;
         let mut frame = 0;
 
         loop {
-            let _executed_cycles;
-            (_executed_cycles, cb_prefix) = self.cpu.run(CYCLES_PER_FRAME, cb_prefix)?;
+            for scanline in 0..153 {
+                let _executed_cycles;
+                (_executed_cycles, cb_prefix) = self.cpu.run(CYCLES_PER_FRAME, cb_prefix)?;
 
-            self.display
-                .draw_scanline(scanline, frame, &self.cpu.vram, &mut self.cpu.ioreg)?;
+                self.display
+                    .draw_scanline(scanline, frame, &self.cpu.vram, &mut self.cpu.ioreg)?;
 
-            scanline = (scanline + 1) % 154;
-            if scanline < 154 {
                 self.cpu
                     .ioreg
                     .set_reg(IoRegisterOffset::LY, scanline.try_into()?);
             }
-
             frame += 1;
         }
     }

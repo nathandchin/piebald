@@ -1,4 +1,4 @@
-use eyre::{OptionExt, Result, eyre};
+use eyre::Result;
 use raylib::prelude::*;
 
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
 pub struct Display {
     rl: RaylibHandle,
     rt: RaylibThread,
+    frame: Image,
 }
 
 const BYTES_PER_TILE: usize = 16;
@@ -33,7 +34,8 @@ impl Display {
     ];
 
     pub fn new(rl: RaylibHandle, rt: RaylibThread) -> Self {
-        Self { rl, rt }
+        let frame = rl.load_image_from_screen(&rt);
+        Self { rl, rt, frame }
     }
 
     pub fn draw_scanline(
@@ -65,8 +67,6 @@ impl Display {
             tiles.push(Tile::from_map_index(mapped_tile_index, vram, MODE)?);
         }
 
-        let mut d = self.rl.begin_drawing(&self.rt);
-
         for (tile_idx, tile) in tiles.iter().enumerate() {
             let y = (scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
                 * Self::SCALE_FACTOR;
@@ -78,9 +78,18 @@ impl Display {
                 let x = (pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE)) as i32
                     * Self::SCALE_FACTOR;
                 let color = Self::PALETTE[usize::from(pixel)];
-                d.draw_rectangle(x, y, Self::SCALE_FACTOR, Self::SCALE_FACTOR, color);
+                self.frame
+                    .draw_rectangle(x, y, Self::SCALE_FACTOR, Self::SCALE_FACTOR, color);
             }
         }
+
+        let texture = self
+            .rl
+            .load_texture_from_image(&self.rt, &self.frame)
+            .unwrap();
+
+        let mut d = self.rl.begin_drawing(&self.rt);
+        d.draw_texture(&texture, 0, 0, Color::WHITE);
 
         if cfg!(debug_assertions) {
             d.draw_text(&format!("Frame: {frame}"), 10, 10, 20, Color::RED);
