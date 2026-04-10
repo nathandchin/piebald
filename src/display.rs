@@ -25,6 +25,7 @@ pub struct Display {
     texture: WeakTexture2D,
 }
 
+#[allow(unused)]
 #[derive(Clone, Copy, Debug)]
 enum TileIdType {
     Object,
@@ -93,7 +94,13 @@ impl Display {
         vram: &[u8],
         ioreg: &mut IoRegisters,
     ) -> Result<()> {
-        let map = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b01000000 == 0b01000000 {
+        let addressing_mode = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b00010000 == 0b00010000 {
+            TileMapAddressingMode::Unsigned
+        } else {
+            TileMapAddressingMode::Signed
+        };
+
+        let tile_map = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b01000000 == 0b01000000 {
             &vram[VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS
                 ..VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP2_SIZE]
         } else {
@@ -101,42 +108,34 @@ impl Display {
                 ..VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP1_SIZE]
         };
 
-        let mut tiles = vec![];
-        let start = scanline / PIXELS_PER_TILE * TILES_PER_ROW;
-        let end = start + TILES_PER_ROW;
-
-        let map = &map[start..end];
-
-        // Obtain tiles from tile maps
-        let mode = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b00010000 == 0b00010000 {
-            TileMapAddressingMode::Unsigned
-        } else {
-            TileMapAddressingMode::Signed
+        // We are only concerned with the tiles that are on the current scanline
+        let tile_map = {
+            let start = scanline / PIXELS_PER_TILE * TILES_PER_ROW;
+            let end = start + TILES_PER_ROW;
+            &tile_map[start..end]
         };
-        for &mapped_tile_index in map {
-            tiles.push(Tile::from_map_index(
-                mapped_tile_index,
-                vram,
-                TileIdType::Object,
-                mode,
-            )?);
-        }
 
-        for (tile_idx, tile) in tiles.iter().enumerate() {
-            let y = scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
-            for (pixel_idx, &pixel) in tile
-                .get_line_pixels(scanline % PIXELS_PER_TILE)
-                .iter()
-                .enumerate()
-            {
-                let x = pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE);
-                let color = Self::PALETTE[usize::from(pixel)];
+        tile_map.iter()
+            // Map list of tile indices -> list of tile structs
+            .flat_map(|&tile_idx| {
+                Tile::from_map_index(tile_idx, vram, TileIdType::Object, addressing_mode)
+            })
+            .enumerate()
+            .for_each(|(tile_idx, tile)| {
+                let y = scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
+                for (pixel_idx, &pixel) in tile
+                    .get_line_pixels(scanline % PIXELS_PER_TILE)
+                    .iter()
+                    .enumerate()
+                {
+                    let x = pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE);
+                    let color = Self::PALETTE[usize::from(pixel)];
 
-                // This is dependent on the chosen PIXEL_FORMAT
-                let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
-                self.pixels[idx] = color;
-            }
-        }
+                    // This is dependent on the chosen PIXEL_FORMAT
+                    let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
+                    self.pixels[idx] = color;
+                }
+            });
 
         Ok(())
     }
