@@ -1,6 +1,6 @@
 mod display;
 
-use display::Display;
+use display::{Display, SCANLINES_PER_FRAME};
 
 use std::{fs::File, io::Read, ops::Shl};
 
@@ -123,13 +123,14 @@ struct Gameboy<'rom> {
 impl Gameboy<'_> {
     fn run(&mut self) -> Result<()> {
         // 70224 dots per frame, 154 scanlines per frame, 4 dots per m-cycle
-        const CYCLES_PER_FRAME: usize = 70224 / 154 / 4;
+        const CYCLES_PER_FRAME: usize = 70224 / SCANLINES_PER_FRAME / 4;
 
         let mut cb_prefix = false;
         let mut frame = 0;
 
+        // Frame loop
         loop {
-            for scanline in 0..153 {
+            for scanline in 0..SCANLINES_PER_FRAME {
                 let _executed_cycles;
                 (_executed_cycles, cb_prefix) = self.cpu.run(CYCLES_PER_FRAME, cb_prefix)?;
 
@@ -141,7 +142,7 @@ impl Gameboy<'_> {
                     .set_reg(IoRegisterOffset::LY, scanline.try_into()?);
             }
 
-            self.display.draw(frame)?;
+            self.display.draw(frame, &self.cpu.ioreg)?;
             frame += 1;
         }
     }

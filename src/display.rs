@@ -11,6 +11,9 @@ const BYTES_PER_TILE: usize = 16;
 const PIXELS_PER_TILE: usize = 8;
 const PIXELS_PER_FULL_SCREEN_ROW: usize = 256;
 const PIXELS_PER_FULL_SCREEN_COL: usize = 256;
+const PIXELS_PER_VISIBLE_ROW: usize = 160;
+const PIXELS_PER_VISIBLE_COL: usize = 144;
+pub const SCANLINES_PER_FRAME: usize = 154;
 const TILES_PER_ROW: usize = PIXELS_PER_FULL_SCREEN_COL / PIXELS_PER_TILE;
 
 // Specific to this implementation
@@ -73,15 +76,41 @@ impl Renderer {
         })
     }
 
-    fn draw(&mut self, frame: usize, pixels: &[u8]) -> Result<()> {
+    fn draw(&mut self, frame: usize, pixels: &[u8], ioreg: &IoRegisters) -> Result<()> {
+        let scy = ioreg.get_reg(IoRegisterOffset::SCY);
+        let scx = ioreg.get_reg(IoRegisterOffset::SCX);
+
         let mut d = self.rl.begin_drawing(&self.rt);
         self.texture.update_texture(pixels)?;
-        d.draw_texture_ex(
+
+        let source = Rectangle {
+            x: scx as f32,
+            y: scy as f32,
+            width: PIXELS_PER_FULL_SCREEN_ROW as f32,
+            height: PIXELS_PER_FULL_SCREEN_COL as f32,
+        };
+        let dest = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: PIXELS_PER_FULL_SCREEN_ROW as f32 * SCALE_FACTOR,
+            height: PIXELS_PER_FULL_SCREEN_COL as f32 * SCALE_FACTOR,
+        };
+
+        d.draw_texture_pro(
             &self.texture,
-            Vector2::zero(),
+            source,
+            dest,
+            Vector2::zero(), // Not used because we're not doing rotation
             0.0,
-            SCALE_FACTOR,
             Color::WHITE,
+        );
+
+        d.draw_rectangle_lines(
+            0,
+            0,
+            PIXELS_PER_VISIBLE_ROW as i32 * SCALE_FACTOR as i32,
+            PIXELS_PER_VISIBLE_COL as i32 * SCALE_FACTOR as i32,
+            Color::BLACK,
         );
 
         if cfg!(debug_assertions) {
@@ -108,9 +137,9 @@ impl Display {
         })
     }
 
-    pub fn draw(&mut self, frame: usize) -> Result<()> {
+    pub fn draw(&mut self, frame: usize, ioreg: &IoRegisters) -> Result<()> {
         match self.rend.as_mut() {
-            Some(rend) => rend.draw(frame, &self.pixels),
+            Some(rend) => rend.draw(frame, &self.pixels, ioreg),
             None => Ok(()),
         }
     }
@@ -135,35 +164,45 @@ impl Display {
                 ..VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP1_SIZE]
         };
 
-        // We are only concerned with the tiles that are on the current scanline
-        let tile_map = {
-            let start = scanline / PIXELS_PER_TILE * TILES_PER_ROW;
-            let end = start + TILES_PER_ROW;
-            &tile_map[start..end]
+        // If we're at the end of the frame, then we compute all the non-visible
+        // scanlines for ease of understanding. This will change eventually.
+        let scanlines = if scanline == PIXELS_PER_VISIBLE_COL {
+            scanline..PIXELS_PER_FULL_SCREEN_COL
+        } else {
+            scanline..scanline + 1
         };
 
-        tile_map
-            .iter()
-            // Map list of tile indices -> list of tile structs
-            .flat_map(|&tile_idx| {
-                Tile::from_map_index(tile_idx, vram, TileIdType::Object, addressing_mode)
-            })
-            .enumerate()
-            .for_each(|(tile_idx, tile)| {
-                let y = scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
-                for (pixel_idx, &pixel) in tile
-                    .get_line_pixels(scanline % PIXELS_PER_TILE)
-                    .iter()
-                    .enumerate()
-                {
-                    let x = pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE);
-                    let color = Self::PALETTE[usize::from(pixel)];
+        for scanline in scanlines {
+            // We are only concerned with the tiles that are on the current scanline
+            let tile_map = {
+                let start = scanline / PIXELS_PER_TILE * TILES_PER_ROW;
+                let end = start + TILES_PER_ROW;
+                &tile_map[start..end]
+            };
 
-                    // This is dependent on the chosen PIXEL_FORMAT
-                    let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
-                    self.pixels[idx] = color;
-                }
-            });
+            tile_map
+                .iter()
+                // Map list of tile indices -> list of tile structs
+                .flat_map(|&tile_idx| {
+                    Tile::from_map_index(tile_idx, vram, TileIdType::Object, addressing_mode)
+                })
+                .enumerate()
+                .for_each(|(tile_idx, tile)| {
+                    let y = scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
+                    for (pixel_idx, &pixel) in tile
+                        .get_line_pixels(scanline % PIXELS_PER_TILE)
+                        .iter()
+                        .enumerate()
+                    {
+                        let x = pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE);
+                        let color = Self::PALETTE[usize::from(pixel)];
+
+                        // This is dependent on the chosen PIXEL_FORMAT
+                        let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
+                        self.pixels[idx] = color;
+                    }
+                });
+        }
 
         Ok(())
     }
