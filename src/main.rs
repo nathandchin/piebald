@@ -84,12 +84,17 @@ enum IoRegisterOffset {
     SCY = 0xff42,
     SCX = 0xff43,
     LY = 0xff44,
-    LYC = 0xff45,
+
+    // Palettes - unimplemented
     BGP = 0xff47,
-    OPB0 = 0xff48,
-    OPB1 = 0xff49,
+    OBP0 = 0xff48,
+    OBP1 = 0xff49,
+
+    // Window control - unimplemented
     WY = 0xff4a,
     WX = 0xff4b,
+
+    // Boot ROM mapped
     BANK = 0xff50,
 }
 
@@ -155,7 +160,6 @@ struct SimpleDmg<'rom> {
     ram: Vec<u8>, // stores both WRAM banks as well as HRAM
     rom: &'rom [u8],
     boot_rom: &'rom [u8],
-    boot_rom_mapped: bool,
     ioreg: IoRegisters,
 }
 
@@ -204,7 +208,6 @@ impl<'rom> SimpleDmg<'rom> {
             vram: vec![0; VRAM_SIZE],
             rom,
             boot_rom,
-            boot_rom_mapped: true,
             ioreg: IoRegisters::new(),
         }
     }
@@ -401,7 +404,9 @@ impl<'rom> SimpleDmg<'rom> {
             0x0000..0x4000 => {
                 let actual_addr = usize::from(address);
 
-                let res = if self.boot_rom_mapped && actual_addr < 0x100 {
+                // Boot ROM mapped
+                let res = if self.ioreg.get_reg(IoRegisterOffset::BANK) == 0 && actual_addr < 0x100
+                {
                     self.boot_rom.get(actual_addr).copied()
                 } else {
                     self.rom.get(actual_addr).copied()
@@ -569,12 +574,18 @@ impl<'rom> SimpleDmg<'rom> {
                 cb_prefix = false;
                 match Self::CB_OPCODES[usize::from(opcode)] {
                     Some(f) => f(self, opcode)?,
-                    None => todo!("CB-prefixed opcode not yet implemented: {opcode:#x}"),
+                    None => todo!(
+                        "CB-prefixed opcode not yet implemented: {opcode:#x} ({:#x})",
+                        self.rf.pc
+                    ),
                 }
             } else {
                 match Self::OPCODES[usize::from(opcode)] {
                     Some(f) => f(self, opcode)?,
-                    None => todo!("Opcode not yet implemented: {opcode:#x}"),
+                    None => todo!(
+                        "Opcode not yet implemented: {opcode:#x} ({:#x})",
+                        self.rf.pc
+                    ),
                 }
             }
         }
