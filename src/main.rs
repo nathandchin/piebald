@@ -6,7 +6,7 @@ use std::{fs::File, io::Read, ops::Shl};
 
 use bitflags::bitflags;
 use clap::Parser;
-use eyre::{OptionExt, Result, eyre};
+use eyre::{Context, OptionExt, Result, eyre};
 use log::{debug, trace};
 use strum_macros::FromRepr;
 
@@ -142,7 +142,12 @@ impl Gameboy<'_> {
 
         loop {
             for scanline in 0..SCANLINES_PER_FRAME {
-                let _executed_cycles = self.cpu.execute_scanline()?;
+                let _executed_cycles = self.cpu.execute_scanline().wrap_err_with(|| {
+                    format!(
+                        "Error encountered at PC = {:#x}, registers = {:#x?}",
+                        self.cpu.rf.pc, self.cpu.rf
+                    )
+                })?;
 
                 self.display
                     .update_scanline(scanline, &self.cpu.vram, &mut self.cpu.ioreg)?;
