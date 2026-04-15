@@ -780,7 +780,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x90-0x9f
         Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), Some(Self::sub_a_r8), None, None, None, None, None, None, None, None,
         // 0xa0-0xaf
-        None, None, None, None, None, None, None, None, Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8),
+        Some(Self::and_a_r8), Some(Self::and_a_r8), Some(Self::and_a_r8), Some(Self::and_a_r8), Some(Self::and_a_r8), Some(Self::and_a_r8), Some(Self::and_a_r8), Some(Self::and_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8), Some(Self::xor_a_r8),
         // 0xb0-0xbf
         None, Some(Self::or_a_r8), None, None, None, None, None, None, Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8),
         // 0xc0-0xcf
@@ -980,8 +980,8 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn ld_r8_r8(&mut self, opcode: u8) -> Result<usize> {
-        let r_dst = opcode << 2 >> 5;
-        let r_src = opcode & 0x7;
+        let r_dst = (opcode & 0b00111000) >> 3;
+        let r_src = opcode & 0b00000111;
         trace!(
             "LD {},{}",
             Self::get_r8_name(r_dst),
@@ -1011,7 +1011,7 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn sub_a_r8(&mut self, opcode: u8) -> Result<usize> {
-        let reg = opcode & 0x7;
+        let reg = opcode & 0b00000111;
         trace!("SUB A,{}", Self::get_r8_name(reg));
         let rhs = self.get_r8(reg)?;
         let (result, carry) = self.rf.a.overflowing_sub(rhs);
@@ -1029,8 +1029,41 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(1)
     }
 
+    fn and_a_r8(&mut self, opcode: u8) -> Result<usize> {
+        let reg = opcode & 0b00000111;
+        trace!("AND {}", Self::get_r8_name(reg));
+        self.rf.a &= self.get_r8(reg)?;
+        self.rf.f.set(Flags::Z, self.rf.a == 0);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.insert(Flags::H);
+        self.rf.f.remove(Flags::C);
+        Ok(1)
+    }
+
+    fn xor_a_r8(&mut self, opcode: u8) -> Result<usize> {
+        let reg = opcode & 0b00000111;
+        trace!("XOR {}", Self::get_r8_name(reg));
+        self.rf.a ^= self.get_r8(reg)?;
+        self.rf.f.remove(Flags::C);
+        self.rf.f.remove(Flags::H);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.set(Flags::Z, self.rf.a == 0);
+        Ok(1)
+    }
+
+    fn or_a_r8(&mut self, opcode: u8) -> Result<usize> {
+        let reg = opcode & 0b00000111;
+        trace!("OR {}", Self::get_r8_name(reg));
+        self.rf.a |= self.get_r8(reg)?;
+        self.rf.f.remove(Flags::C);
+        self.rf.f.remove(Flags::H);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.set(Flags::Z, self.rf.a == 0);
+        Ok(1)
+    }
+
     fn cp_a_r8(&mut self, opcode: u8) -> Result<usize> {
-        let reg = opcode & 0x7;
+        let reg = opcode & 0b00000111;
         trace!("CP {}", Self::get_r8_name(reg));
         let rhs = self.get_r8(reg)?;
         let (result, carry) = self.rf.a.overflowing_sub(rhs);
@@ -1043,26 +1076,6 @@ impl<'rom> SimpleDmg<'rom> {
         );
         self.rf.f.set(Flags::C, carry);
 
-        Ok(1)
-    }
-
-    fn xor_a_r8(&mut self, opcode: u8) -> Result<usize> {
-        trace!("XOR {}", Self::get_r8_name(opcode & 0b00000111));
-        self.rf.a ^= self.get_r8(opcode << 5 >> 5)?;
-        self.rf.f.remove(Flags::C);
-        self.rf.f.remove(Flags::H);
-        self.rf.f.remove(Flags::N);
-        self.rf.f.set(Flags::Z, self.rf.a == 0);
-        Ok(1)
-    }
-
-    fn or_a_r8(&mut self, opcode: u8) -> Result<usize> {
-        trace!("OR {}", Self::get_r8_name(opcode & 0b00000111));
-        self.rf.a |= self.get_r8(opcode << 5 >> 5)?;
-        self.rf.f.remove(Flags::C);
-        self.rf.f.remove(Flags::H);
-        self.rf.f.remove(Flags::N);
-        self.rf.f.set(Flags::Z, self.rf.a == 0);
         Ok(1)
     }
 
