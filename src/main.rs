@@ -247,7 +247,7 @@ impl<'rom> SimpleDmg<'rom> {
                 self.read(addr)?
             }
             7 => self.rf.a,
-            _ => unreachable!("Invalid R8 identifier"),
+            _ => unreachable!("Invalid R8 identifier: {r}"),
         })
     }
 
@@ -264,7 +264,7 @@ impl<'rom> SimpleDmg<'rom> {
                 self.write(addr, n)?;
             }
             7 => self.rf.a = n,
-            _ => unreachable!("Invalid R8 identifier"),
+            _ => unreachable!("Invalid R8 identifier: {r}"),
         }
         Ok(())
     }
@@ -279,7 +279,7 @@ impl<'rom> SimpleDmg<'rom> {
             5 => "L",
             6 => "(HL)",
             7 => "A",
-            _ => unreachable!("Invalid R8 identifier"),
+            _ => unreachable!("Invalid R8 identifier: {r}"),
         }
     }
 
@@ -289,7 +289,7 @@ impl<'rom> SimpleDmg<'rom> {
             1 => u16::from_be_bytes([self.rf.d, self.rf.e]),
             2 => u16::from_be_bytes([self.rf.h, self.rf.l]),
             3 => self.rf.sp,
-            _ => unreachable!("Invalid R16 identifier"),
+            _ => unreachable!("Invalid R16 identifier: {r}"),
         }
     }
 
@@ -311,7 +311,7 @@ impl<'rom> SimpleDmg<'rom> {
             3 => {
                 self.rf.sp = n;
             }
-            _ => unreachable!("Invalid R16 identifier"),
+            _ => unreachable!("Invalid R16 identifier: {r}"),
         };
     }
 
@@ -321,7 +321,7 @@ impl<'rom> SimpleDmg<'rom> {
             1 => "DE",
             2 => "HL",
             3 => "SP",
-            _ => unreachable!("Invalid R16 identifier"),
+            _ => unreachable!("Invalid R16 identifier: {r}"),
         }
     }
 
@@ -331,7 +331,7 @@ impl<'rom> SimpleDmg<'rom> {
             1 => u16::from_be_bytes([self.rf.d, self.rf.e]),
             2 => u16::from_be_bytes([self.rf.h, self.rf.l]),
             3 => u16::from_be_bytes([self.rf.a, self.rf.f.bits()]),
-            _ => unreachable!("Invalid R16stk identifier"),
+            _ => unreachable!("Invalid R16stk identifier: {r}"),
         }
     }
 
@@ -345,7 +345,7 @@ impl<'rom> SimpleDmg<'rom> {
                 self.rf.a = msb;
                 self.rf.f = Flags::from_bits_retain(lsb);
             }
-            _ => unreachable!("Invalid R16stk identifier"),
+            _ => unreachable!("Invalid R16stk identifier: {r}"),
         };
     }
 
@@ -355,7 +355,7 @@ impl<'rom> SimpleDmg<'rom> {
             1 => "DE",
             2 => "HL",
             3 => "AF",
-            _ => unreachable!("Invalid R16stk identifier"),
+            _ => unreachable!("Invalid R16stk identifier: {r}"),
         }
     }
 
@@ -381,7 +381,7 @@ impl<'rom> SimpleDmg<'rom> {
 
                 Ok(res)
             }
-            _ => unreachable!("Invalid R16mem identifier"),
+            _ => unreachable!("Invalid R16mem identifier: {r}"),
         }
     }
 
@@ -405,7 +405,7 @@ impl<'rom> SimpleDmg<'rom> {
 
                 Ok(())
             }
-            _ => unreachable!("Invalid R16mem identifier"),
+            _ => unreachable!("Invalid R16mem identifier: {r}"),
         }
     }
 
@@ -415,7 +415,7 @@ impl<'rom> SimpleDmg<'rom> {
             1 => "DE",
             2 => "HL+",
             3 => "HL-",
-            _ => unreachable!("Invalid R16mem identifier"),
+            _ => unreachable!("Invalid R16mem identifier: {r}"),
         }
     }
 
@@ -786,11 +786,11 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xc0-0xcf
         None, Some(Self::pop_r16stk), None, Some(Self::jp_imm16), None, Some(Self::push_r16stk), None, None, None, Some(Self::ret), None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        None, None, None, None, None, Some(Self::push_r16stk), None, None, None, None, None, None, None, None, None, None,
         // 0xe0-0xef
-        Some(Self::ldh_imm8mem_a), None, Some(Self::ldh_cmem_a), None, None, None, None, None, None, None, Some(Self::ld_imm16mem_a), None, None, None, None, None,
+        Some(Self::ldh_imm8mem_a), None, Some(Self::ldh_cmem_a), None, None, Some(Self::push_r16stk), None, None, None, None, Some(Self::ld_imm16mem_a), None, None, None, None, None,
         // 0xf0-0xff
-        Some(Self::ldh_a_imm8mem), None, None, Some(Self::di), None, None, None, None, None, None, Some(Self::ld_a_imm16mem), None, None, None, Some(Self::cp_a_imm8), None,
+        Some(Self::ldh_a_imm8mem), None, None, Some(Self::di), None, Some(Self::push_r16stk), None, None, None, None, Some(Self::ld_a_imm16mem), Some(Self::ei), None, None, Some(Self::cp_a_imm8), None,
     ];
 
     #[rustfmt::skip]
@@ -1129,7 +1129,7 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn push_r16stk(&mut self, opcode: u8) -> Result<usize> {
-        let reg = opcode << 2 >> 5;
+        let reg = opcode << 2 >> 6;
         trace!("PUSH {}", Self::get_r16stk_name(reg));
 
         let [r_msb, r_lsb] = self.get_r16stk(reg).to_be_bytes();
@@ -1179,6 +1179,12 @@ impl<'rom> SimpleDmg<'rom> {
     fn di(&mut self, _opcode: u8) -> Result<usize> {
         trace!("DI");
         self.ioreg.interrupts_enabled = false;
+        Ok(1)
+    }
+
+    fn ei(&mut self, _opcode: u8) -> Result<usize> {
+        trace!("EI");
+        self.ioreg.interrupts_enabled = true;
         Ok(1)
     }
 
