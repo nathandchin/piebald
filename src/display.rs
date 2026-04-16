@@ -184,7 +184,12 @@ impl Display {
                 .iter()
                 // Map list of tile indices -> list of tile structs
                 .flat_map(|&tile_idx| {
-                    Tile::from_map_index(tile_idx, vram, TileIdType::Object, addressing_mode)
+                    Tile::from_map_index(
+                        tile_idx,
+                        vram,
+                        TileIdType::BackgroundWindow,
+                        addressing_mode,
+                    )
                 })
                 .enumerate()
                 .for_each(|(tile_idx, tile)| {
@@ -223,10 +228,13 @@ impl Tile {
         let start = if matches!(tile_type, TileIdType::BackgroundWindow)
             && matches!(mode, TileMapAddressingMode::Signed)
         {
-            usize::try_from(i16::try_from(0x9000 - VRAM_START_ADDRESS)? + i16::from(map_index))?
+            usize::try_from(
+                i16::try_from(0x9000 - VRAM_START_ADDRESS)?
+                    + i16::from(map_index.cast_signed()) * i16::try_from(BYTES_PER_TILE)?,
+            )?
         } else {
-            (0x8000 - VRAM_START_ADDRESS) + usize::from(map_index)
-        } * BYTES_PER_TILE;
+            (0x8000 - VRAM_START_ADDRESS) + usize::from(map_index) * BYTES_PER_TILE
+        };
         let mut bytes = [0; BYTES_PER_TILE];
         bytes.copy_from_slice(&memory[start..start + BYTES_PER_TILE]);
 
