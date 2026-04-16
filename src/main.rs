@@ -99,6 +99,8 @@ enum IoRegisterOffset {
     LY = 0xff44,
     LYC = 0xff45,
 
+    OAM = 0xff46,
+
     // Palettes - unimplemented
     BGP = 0xff47,
     OBP0 = 0xff48,
@@ -177,11 +179,13 @@ impl Gameboy<'_> {
 struct SimpleDmg<'rom> {
     rf: RegisterFile,
     vram: Vec<u8>,
+    oam: Vec<u8>,
     ram: Vec<u8>, // stores both WRAM banks as well as HRAM
     rom: &'rom [u8],
     wom: Vec<u8>, // WOM :)
     boot_rom: &'rom [u8],
     ioreg: IoRegisters,
+    oam_dma_triggered: Option<u8>,
 }
 
 const VRAM_START_ADDRESS: usize = 0x8000;
@@ -191,6 +195,9 @@ const VRAM_TILE_MAP1_SIZE: usize = 0x400;
 const VRAM_TILE_MAP2_START_ADDRESS: usize = 0x9C00;
 const VRAM_TILE_MAP2_SIZE: usize = 0x400;
 
+const OAM_START_ADDRESS: usize = 0xFE00;
+const OAM_SIZE: usize = 0xA0;
+
 const WRAM_START_ADDRESS: usize = 0xc000;
 const WRAM_SIZE: usize = 0x2000; // 2 banks
 
@@ -199,6 +206,10 @@ const HRAM_SIZE: usize = 0x80;
 
 const IOREG_START_ADDRESS: usize = 0xff00;
 const IOREG_SIZE: usize = 0x78;
+
+const DOTS_PER_FRAME: usize = 70224;
+const DOTS_PER_M_CYCLE: usize = 4;
+const M_CYCLES_PER_SCANLINE: usize = DOTS_PER_FRAME / SCANLINES_PER_FRAME / DOTS_PER_M_CYCLE;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -227,10 +238,12 @@ impl<'rom> SimpleDmg<'rom> {
             rf: RegisterFile::default(),
             ram,
             vram: vec![0; VRAM_SIZE],
+            oam: vec![0; VRAM_SIZE],
             rom,
             wom: vec![],
             boot_rom,
             ioreg: IoRegisters::new(),
+            oam_dma_triggered: None,
         }
     }
 
@@ -592,7 +605,12 @@ impl<'rom> SimpleDmg<'rom> {
             0xE000..0xFE00 => Err(eyre!("Invalid write at address {address:#x}")),
             // Object attribute memory (OAM)
             0xFE00..0xFEA0 => {
-                // TODO: implement OAM
+                let actual_addr = usize::from(address) - OAM_START_ADDRESS;
+                debug!("Write {data:#x} to OAM at {address:#x} (={actual_addr:#x})");
+                *self
+                    .ram
+                    .get_mut(actual_addr)
+                    .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
                 Ok(())
             }
             // Not Usable
@@ -601,7 +619,10 @@ impl<'rom> SimpleDmg<'rom> {
             0xFF00..0xFF78 => {
                 if let Some(reg) = IoRegisterOffset::from_repr(address) {
                     debug!("Write {data:#x} to IO register at {address:#x}");
-                    self.ioreg.set_reg(reg, data);
+                    match reg {
+                        IoRegisterOffset::OAM => self.oam_dma_triggered = Some(data),
+                        _ => self.ioreg.set_reg(reg, data),
+                    }
                     Ok(())
                 } else {
                     Err(eyre!("Unimplemented IO register: {address:#x}"))
@@ -627,12 +648,18 @@ impl<'rom> SimpleDmg<'rom> {
         }
     }
 
-    fn execute_scanline(&mut self) -> Result<usize> {
-        const DOTS_PER_FRAME: usize = 70224;
-        const DOTS_PER_M_CYCLE: usize = 4;
-        const M_CYCLES_PER_SCANLINE: usize =
-            DOTS_PER_FRAME / SCANLINES_PER_FRAME / DOTS_PER_M_CYCLE;
+    fn oam_dma_transfer(&mut self, src: u8) -> Result<()> {
+        let src = u16::from(src) << 8;
 
+        // TODO: optimize with direct memcpy
+        for (offset, addr) in (src..src + OAM_SIZE as u16).enumerate() {
+            self.write(u16::try_from(OAM_START_ADDRESS + offset)?, self.read(addr)?)?;
+        }
+
+        Ok(())
+    }
+
+    fn execute_scanline(&mut self) -> Result<usize> {
         const INTERRUPT_MASK_VBLANK: u8 = 0b00000001;
         const INTERRUPT_MASK_LCD: u8 = 0b00000010;
         const INTERRUPT_MASK_TIMER: u8 = 0b00000100;
@@ -723,6 +750,16 @@ impl<'rom> SimpleDmg<'rom> {
                         break;
                     }
                 }
+            }
+
+            if let Some(addr) = self.oam_dma_triggered {
+                self.oam_dma_triggered = None;
+                self.oam_dma_transfer(addr)?;
+
+                // OAM DMA transfer takes 160 M-cycles, which is an entire
+                // frame, so we end here.
+                cycles += 160;
+                break 'scanline_loop;
             }
 
             let opcode = self.read_pc_inc()?;
