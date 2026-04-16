@@ -120,7 +120,8 @@ struct IoRegisters {
 
     // These are separate because IME is not really an IO register, and IE is
     // out of the range of the other IO registers.
-    interrupts_enabled: bool, // IME (interrupt master enable)
+    /// IME (interrupt master enable)
+    interrupts_enabled: bool,
     ie: u8,
 }
 
@@ -823,7 +824,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xc0-0xcf
         Some(Self::ret_cond), Some(Self::pop_r16stk), None, Some(Self::jp_imm16), None, Some(Self::push_r16stk), None, None, Some(Self::ret_cond), Some(Self::ret), None, None, None, Some(Self::call_imm16), None, None,
         // 0xd0-0xdf
-        Some(Self::ret_cond), Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, Some(Self::ret_cond), None, None, None, None, None, None, None,
+        Some(Self::ret_cond), Some(Self::pop_r16stk), None, None, None, Some(Self::push_r16stk), None, None, Some(Self::ret_cond), Some(Self::reti), None, None, None, None, None, None,
         // 0xe0-0xef
         Some(Self::ldh_imm8mem_a), Some(Self::pop_r16stk), Some(Self::ldh_cmem_a), None, None, Some(Self::push_r16stk), None, None, None, None, Some(Self::ld_imm16mem_a), None, None, None, None, None,
         // 0xf0-0xff
@@ -1195,6 +1196,17 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.sp = self.rf.sp.wrapping_add(1);
 
         self.rf.pc = u16::from_le_bytes([nn_lsb, nn_msb]);
+        Ok(4)
+    }
+
+    fn reti(&mut self, _opcode: u8) -> Result<usize> {
+        let nn_lsb = self.read(self.rf.sp)?;
+        self.rf.sp = self.rf.sp.wrapping_add(1);
+        let nn_msb = self.read(self.rf.sp)?;
+        self.rf.sp = self.rf.sp.wrapping_add(1);
+
+        self.rf.pc = u16::from_le_bytes([nn_lsb, nn_msb]);
+        self.ioreg.interrupts_enabled = true;
         Ok(4)
     }
 
