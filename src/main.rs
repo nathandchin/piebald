@@ -841,13 +841,13 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x30-0x3f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x40-0x4f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8),
         // 0x50-0x5f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8),
         // 0x60-0x6f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8),
         // 0x70-0x7f
-        None, None, None, None, None, None, None, None, None, None, None, None, Some(Self::bit_b3_r8), None, None, None,
+        Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8),
         // 0x80-0x8f
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x90-0x9f
@@ -1201,7 +1201,7 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn pop_r16stk(&mut self, opcode: u8) -> Result<usize> {
-        let reg = opcode << 2 >> 5;
+        let reg = opcode << 2 >> 6;
         trace!("POP {}", Self::get_r16stk_name(reg));
 
         let lsb = self.read(self.rf.sp)?;
