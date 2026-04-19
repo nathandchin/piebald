@@ -72,6 +72,8 @@ enum IoRegisterOffset {
     SB = 0xff01,
     SC = 0xff02,
 
+    DIV = 0xff04,
+
     // Interrupts
     IF = 0xff0f,
     // IE/0xffff is handled specially
@@ -123,6 +125,8 @@ struct IoRegisters {
     /// IME (interrupt master enable)
     interrupts_enabled: bool,
     ie: u8,
+
+    cycles_since_div_inc: usize,
 }
 
 impl IoRegisters {
@@ -131,6 +135,7 @@ impl IoRegisters {
             dat: [0; IOREG_SIZE],
             interrupts_enabled: true,
             ie: 0,
+            cycles_since_div_inc: 0,
         }
     }
 
@@ -140,6 +145,25 @@ impl IoRegisters {
 
     fn set_reg(&mut self, reg: IoRegisterOffset, val: u8) {
         self.dat[reg as usize - IOREG_START_ADDRESS] = val;
+    }
+
+    /// Check current DIV value against cycles_since_div_inc and adjust both as
+    /// appropriate. Handles cases where cycles_since_div_inc is several times
+    /// greater than DIV.
+    fn handle_timer_inc(&mut self) {
+        const CPU_CLOCK_HZ: usize = 2usize.pow(22);
+        const DIV_TIMER_HZ: usize = 2usize.pow(14);
+        const M_CYCLES_PER_DIV_INC: usize = CPU_CLOCK_HZ / DIV_TIMER_HZ / DOTS_PER_M_CYCLE;
+
+        if self.cycles_since_div_inc > M_CYCLES_PER_DIV_INC {
+            for _ in 0..self.cycles_since_div_inc / M_CYCLES_PER_DIV_INC {
+                self.set_reg(
+                    IoRegisterOffset::DIV,
+                    self.get_reg(IoRegisterOffset::DIV).wrapping_add(1),
+                );
+                self.cycles_since_div_inc -= M_CYCLES_PER_DIV_INC;
+            }
+        }
     }
 }
 
@@ -649,18 +673,30 @@ impl<'rom> SimpleDmg<'rom> {
         }
     }
 
-    fn oam_dma_transfer(&mut self, src: u8) -> Result<()> {
-        let src = u16::from(src) << 8;
+    /// See https://gbdev.io/pandocs/Accessing_VRAM_and_OAM.html.
+    /// TODO: Access times
+    /// TODO: OAM corruption
+    fn handle_oam_dma_transfer(&mut self) -> Result<usize> {
+        if let Some(src) = self.oam_dma_triggered {
+            self.oam_dma_triggered = None;
 
-        // TODO: optimize with direct memcpy
-        for (offset, addr) in (src..src + OAM_SIZE as u16).enumerate() {
-            self.write(u16::try_from(OAM_START_ADDRESS + offset)?, self.read(addr)?)?;
+            let src = u16::from(src) << 8;
+
+            // TODO: optimize with direct memcpy
+            for (offset, addr) in (src..src + OAM_SIZE as u16).enumerate() {
+                self.write(u16::try_from(OAM_START_ADDRESS + offset)?, self.read(addr)?)?;
+            }
+
+            // Always 160 M-cycles
+            Ok(160)
+        } else {
+            Ok(0)
         }
-
-        Ok(())
     }
 
-    fn execute_scanline(&mut self) -> Result<usize> {
+    /// Only VBlank and LCD interrupts are updates here, the others are just
+    /// checked for.
+    fn handle_interrupts(&mut self, dot: usize) -> Result<usize> {
         const INTERRUPT_MASK_VBLANK: u8 = 0b00000001;
         const INTERRUPT_MASK_LCD: u8 = 0b00000010;
         const INTERRUPT_MASK_TIMER: u8 = 0b00000100;
@@ -676,104 +712,102 @@ impl<'rom> SimpleDmg<'rom> {
             );
         }
 
-        let mut cycles = 0;
-        let mut cb_prefix = false;
+        let mut int_flag = self.ioreg.get_reg(IoRegisterOffset::IF);
 
-        // Check cb_prefix in addition to cycle count because we don't want to
-        // split up an instruction consisting of CB + some auxiliary opcode
-        // across multiple invocations. That should count as one opcode. If we
-        // go over on M-cycles, so be it.
-        'scanline_loop: while cycles < M_CYCLES_PER_SCANLINE || cb_prefix {
-            let mut int_flag = self.ioreg.get_reg(IoRegisterOffset::IF);
-
-            /* Check STAT/LCD interrupt conditions.
-             * From https://gbdev.io/pandocs/Interrupt_Sources.html:
-             * "The various STAT interrupt sources (modes 0-2 and LYC=LY)
-             * have their state (inactive=low and active=high) logically
-             * ORed into a shared "STAT interrupt line" if their respective
-             * enable bit is turned on."
-             */
-            {
-                let dot = cycles * DOTS_PER_M_CYCLE;
-                let ly = self.ioreg.get_reg(IoRegisterOffset::LY);
-                if (ly == self.ioreg.get_reg(IoRegisterOffset::LYC)) // LYC
+        /* Check STAT/LCD interrupt conditions.
+         * From https://gbdev.io/pandocs/Interrupt_Sources.html:
+         * "The various STAT interrupt sources (modes 0-2 and LYC=LY)
+         * have their state (inactive=low and active=high) logically
+         * ORed into a shared "STAT interrupt line" if their respective
+         * enable bit is turned on."
+         */
+        {
+            let ly = self.ioreg.get_reg(IoRegisterOffset::LY);
+            if (ly == self.ioreg.get_reg(IoRegisterOffset::LYC)) // LYC
                     // Mode 2
                     || (ly < 144 && dot == 0)
                     // Mode 0
                     || (ly < 144 && dot == 268)
                     // Mode 1
                     || (144 <= ly && dot == 0)
-                {
-                    int_flag &= INTERRUPT_MASK_LCD;
-                }
+            {
+                int_flag &= INTERRUPT_MASK_LCD;
             }
+        }
 
-            // Check for which interrupts are requested and dispatch as
-            // necessary
-            if self.ioreg.interrupts_enabled {
-                for (mask, handler) in [
-                    (INTERRUPT_MASK_VBLANK, 0x40),
-                    (INTERRUPT_MASK_LCD, 0x48),
-                    (INTERRUPT_MASK_TIMER, 0x50),
-                    (INTERRUPT_MASK_SERIAL, 0x58),
-                    (INTERRUPT_MASK_JOYPAD, 0x60),
-                ] {
-                    if int_flag & mask == mask {
-                        debug!("Service interrupt mask={mask:#x}, handler={handler:#x}");
+        // Check for which interrupts are requested and dispatch as
+        // necessary
+        if self.ioreg.interrupts_enabled {
+            for (mask, handler) in [
+                (INTERRUPT_MASK_VBLANK, 0x40),
+                (INTERRUPT_MASK_LCD, 0x48),
+                (INTERRUPT_MASK_TIMER, 0x50),
+                (INTERRUPT_MASK_SERIAL, 0x58),
+                (INTERRUPT_MASK_JOYPAD, 0x60),
+            ] {
+                if int_flag & mask == mask {
+                    debug!("Service interrupt mask={mask:#x}, handler={handler:#x}");
 
-                        // IME and corresponding bit set to 0 upon servicing
-                        self.ioreg.set_reg(IoRegisterOffset::IF, int_flag & !mask);
-                        self.ioreg.interrupts_enabled = false;
+                    // IME and corresponding bit set to 0 upon servicing
+                    self.ioreg.set_reg(IoRegisterOffset::IF, int_flag & !mask);
+                    self.ioreg.interrupts_enabled = false;
 
-                        // Nearly identical to `call`; we push PC to stack and
-                        // set PC to the appropriate handler
-                        {
-                            let [pc_msb, pc_lsb] = self.rf.pc.to_be_bytes();
-                            self.rf.sp = self.rf.sp.wrapping_sub(1);
-                            self.write(self.rf.sp, pc_msb)?;
-                            self.rf.sp = self.rf.sp.wrapping_sub(1);
-                            self.write(self.rf.sp, pc_lsb)?;
-                            self.rf.pc = handler;
-                        }
-
-                        // Servicing an interrupt is always 5 M-cycles
-                        cycles += 5;
-
-                        // Check again in case the overhead of servicing an
-                        // interrupt pushed us over the edge of the current
-                        // scanline
-                        if cycles >= M_CYCLES_PER_SCANLINE {
-                            break 'scanline_loop;
-                        }
-
-                        // Can only service one request, and we set IF bit and
-                        // IME to 0, so now we move on
-                        break;
+                    // Nearly identical to `call`; we push PC to stack and
+                    // set PC to the appropriate handler
+                    {
+                        let [pc_msb, pc_lsb] = self.rf.pc.to_be_bytes();
+                        self.rf.sp = self.rf.sp.wrapping_sub(1);
+                        self.write(self.rf.sp, pc_msb)?;
+                        self.rf.sp = self.rf.sp.wrapping_sub(1);
+                        self.write(self.rf.sp, pc_lsb)?;
+                        self.rf.pc = handler;
                     }
+
+                    // Servicing an interrupt is always 5 M-cycles.
+                    // Can only service one request, and we set IF bit and
+                    // IME to 0, so now we move on
+                    return Ok(5);
                 }
             }
+        }
 
-            if let Some(addr) = self.oam_dma_triggered {
-                self.oam_dma_triggered = None;
-                self.oam_dma_transfer(addr)?;
+        Ok(0)
+    }
 
-                // OAM DMA transfer takes 160 M-cycles, which is an entire
-                // frame, so we end here.
-                cycles += 160;
-                break 'scanline_loop;
-            }
+    fn execute_scanline(&mut self) -> Result<usize> {
+        let mut cycles = 0;
 
-            let opcode = self.read_pc_inc()?;
+        // This is used throughout the execution loop so that no more M-cycles
+        // are executed than could fit in a scanline. Also updates the counter
+        // for DIV increments.
+        macro_rules! check_cycles {
+            ($e:expr) => {{
+                let c = $e;
+                cycles += c;
+                self.ioreg.cycles_since_div_inc += c;
+                if cycles >= M_CYCLES_PER_SCANLINE {
+                    break;
+                }
+            }};
+        }
+
+        loop {
+            self.ioreg.handle_timer_inc();
+            check_cycles!(self.handle_interrupts(cycles * DOTS_PER_M_CYCLE)?);
+            check_cycles!(self.handle_oam_dma_transfer()?);
+
+            // Get next opcode
+            let mut cb_prefixed = false;
+            let mut opcode = self.read_pc_inc()?;
             debug!("pc:{:#x}, opcode:{:#x}", self.rf.pc, opcode);
-
             if opcode == 0xcb {
-                cb_prefix = true;
-                cycles += 1;
-                continue;
+                cb_prefixed = true;
+                opcode = self.read_pc_inc()?;
+                debug!("pc:{:#x}, opcode:{:#x}", self.rf.pc, opcode);
             }
 
-            cycles += if cb_prefix {
-                cb_prefix = false;
+            // Dispatch
+            check_cycles!(if cb_prefixed {
                 match Self::CB_OPCODES[usize::from(opcode)] {
                     Some(f) => f(self, opcode)?,
                     None => todo!(
@@ -789,7 +823,7 @@ impl<'rom> SimpleDmg<'rom> {
                         self.rf.pc
                     ),
                 }
-            }
+            });
         }
 
         Ok(cycles)
@@ -1035,6 +1069,8 @@ impl<'rom> SimpleDmg<'rom> {
     fn stop(&mut self, _opcode: u8) -> Result<usize> {
         trace!("STOP");
         Err(eyre!("STOP encountered"))
+        // todo: don't increase DIV
+        // todo: reset DIV
         // todo: 1 tick
     }
 
