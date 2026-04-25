@@ -2,7 +2,7 @@ mod display;
 
 use display::{Display, SCANLINES_PER_FRAME};
 
-use std::{fs::File, io::Read, ops::Shl};
+use std::{fs::File, io::Read};
 
 use bitflags::bitflags;
 use clap::Parser;
@@ -93,12 +93,34 @@ enum IoRegisterOffset {
     NR14 = 0xff14,
     NR22 = 0xff17,
     NR24 = 0xff19,
+    NR31 = 0xff1b,
+    NR32 = 0xff1c,
+    NR33 = 0xff1d,
+    NR34 = 0xff1e,
     NR42 = 0xff21,
     NR44 = 0xff23,
     NR50 = 0xff24,
     NR30 = 0xff1a,
     NR51 = 0xff25,
     NR52 = 0xff26,
+
+    // Wave pattern - unimplemented
+    WAV1 = 0xff30,
+    WAV2 = 0xff31,
+    WAV3 = 0xff32,
+    WAV4 = 0xff33,
+    WAV5 = 0xff34,
+    WAV6 = 0xff35,
+    WAV7 = 0xff36,
+    WAV8 = 0xff37,
+    WAV9 = 0xff38,
+    WAV10 = 0xff39,
+    WAV11 = 0xff3a,
+    WAV12 = 0xff3b,
+    WAV13 = 0xff3c,
+    WAV14 = 0xff3d,
+    WAV15 = 0xff3e,
+    WAV16 = 0xff3f,
 
     // Display
     LCDC = 0xff40,
@@ -839,13 +861,13 @@ impl<'rom> SimpleDmg<'rom> {
     #[rustfmt::skip]
     const OPCODES: [Option<OpcodeFn<'rom>>; 256] = [
         // 0x00-0x0f
-        Some(Self::nop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), Some(Self::rlca), None, Some(Self::add_hl_r16), None, Some(Self::dec_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
+        Some(Self::nop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), Some(Self::rlca), None, Some(Self::add_hl_r16), Some(Self::ld_a_r16mem), Some(Self::dec_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x10-0x1f
         Some(Self::stop), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), Some(Self::rla), Some(Self::jr_imm8), Some(Self::add_hl_r16), Some(Self::ld_a_r16mem), None, Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x20-0x2f
         Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None, Some(Self::jr_cond_imm8), Some(Self::add_hl_r16), Some(Self::ld_a_r16mem), None, Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), Some(Self::cpl),
         // 0x30-0x3f
-        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None, Some(Self::jr_cond_imm8), Some(Self::add_hl_r16), None, None, Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
+        Some(Self::jr_cond_imm8), Some(Self::ld_r16_imm16), Some(Self::ld_r16mem_a), Some(Self::inc_r16), Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None, Some(Self::jr_cond_imm8), Some(Self::add_hl_r16), Some(Self::ld_a_r16mem), None, Some(Self::inc_r8), Some(Self::dec_r8), Some(Self::ld_r8_imm8), None,
         // 0x40-0x4f
         Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8), Some(Self::ld_r8_r8),
         // 0x50-0x5f
@@ -863,7 +885,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xb0-0xbf
         Some(Self::or_a_r8), Some(Self::or_a_r8), Some(Self::or_a_r8), Some(Self::or_a_r8), Some(Self::or_a_r8), Some(Self::or_a_r8), Some(Self::or_a_r8), Some(Self::or_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8), Some(Self::cp_a_r8),
         // 0xc0-0xcf
-        Some(Self::ret_cond), Some(Self::pop_r16stk), Some(Self::jp_cond_imm16), Some(Self::jp_imm16), None, Some(Self::push_r16stk), None, Some(Self::rst_tgt3), Some(Self::ret_cond), Some(Self::ret), Some(Self::jp_cond_imm16), None, None, Some(Self::call_imm16), Some(Self::adc_a_imm8), Some(Self::rst_tgt3),
+        Some(Self::ret_cond), Some(Self::pop_r16stk), Some(Self::jp_cond_imm16), Some(Self::jp_imm16), None, Some(Self::push_r16stk), Some(Self::add_a_imm8), Some(Self::rst_tgt3), Some(Self::ret_cond), Some(Self::ret), Some(Self::jp_cond_imm16), None, None, Some(Self::call_imm16), Some(Self::adc_a_imm8), Some(Self::rst_tgt3),
         // 0xd0-0xdf
         Some(Self::ret_cond), Some(Self::pop_r16stk), Some(Self::jp_cond_imm16), None, None, Some(Self::push_r16stk), None, Some(Self::rst_tgt3), Some(Self::ret_cond), Some(Self::reti), Some(Self::jp_cond_imm16), None, None, None, None, Some(Self::rst_tgt3),
         // 0xe0-0xef
@@ -879,7 +901,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x10-0x1f
         None, Some(Self::rl_r8), None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0x20-0x2f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::sla_r8), Some(Self::sla_r8), Some(Self::sla_r8), Some(Self::sla_r8), Some(Self::sla_r8), Some(Self::sla_r8), Some(Self::sla_r8), Some(Self::sla_r8), None, None, None, None, None, None, None, None,
         // 0x30-0x3f
         Some(Self::swap_r8), Some(Self::swap_r8), Some(Self::swap_r8), Some(Self::swap_r8), Some(Self::swap_r8), Some(Self::swap_r8), Some(Self::swap_r8), Some(Self::swap_r8), None, None, None, None, None, None, None, None,
         // 0x40-0x4f
@@ -1034,7 +1056,7 @@ impl<'rom> SimpleDmg<'rom> {
 
         let a7 = (a & 0b10000000) >> 7;
         let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
-        a = a.shl(1) | carry_bit;
+        a = (a << 1) | carry_bit;
 
         self.rf.f.remove(Flags::Z);
         self.rf.f.remove(Flags::N);
@@ -1047,6 +1069,7 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn cpl(&mut self, _opcode: u8) -> Result<usize> {
+        trace!("CPL");
         self.rf.a = !self.rf.a;
         self.rf.f.insert(Flags::N);
         self.rf.f.insert(Flags::H);
@@ -1196,6 +1219,24 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.f.set(Flags::C, carry);
 
         Ok(1)
+    }
+
+    fn add_a_imm8(&mut self, _opcode: u8) -> Result<usize> {
+        let n = self.read_pc_inc()?;
+        trace!("ADD {n:#x}");
+
+        let carry;
+        (self.rf.a, carry) = self.rf.a.overflowing_add(n);
+
+        self.rf.f.set(Flags::Z, self.rf.a == 0);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.set(
+            Flags::H,
+            (((self.rf.a & 0xf).wrapping_add(n & 0xf)) & 0x10) == 0x10,
+        );
+        self.rf.f.set(Flags::C, carry);
+
+        Ok(2)
     }
 
     fn adc_a_imm8(&mut self, _opcode: u8) -> Result<usize> {
@@ -1364,6 +1405,8 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.sp = self.rf.sp.wrapping_sub(1);
         self.write(self.rf.sp, pc_lsb)?;
 
+        self.rf.pc = u16::from_be_bytes([0x00, tgt]);
+
         Ok(4)
     }
 
@@ -1451,7 +1494,7 @@ impl<'rom> SimpleDmg<'rom> {
         let mut curr = self.get_r8(reg)?;
         let curr7 = (curr & 0b10000000) >> 7;
         let carry_bit: u8 = if self.rf.f.contains(Flags::C) { 1 } else { 0 };
-        curr = curr.shl(1) | carry_bit;
+        curr = (curr << 1) | carry_bit;
 
         self.rf.f.set(Flags::Z, curr == 0);
         self.rf.f.remove(Flags::N);
@@ -1459,6 +1502,23 @@ impl<'rom> SimpleDmg<'rom> {
         self.rf.f.set(Flags::C, curr7 == 1);
 
         self.set_r8(reg, curr)?;
+        Ok(2)
+    }
+
+    fn sla_r8(&mut self, opcode: u8) -> Result<usize> {
+        let reg = opcode & 0b00000111;
+        trace!("SLA {}", Self::get_r8_name(reg));
+
+        let mut r = self.get_r8(reg)?;
+        let r7 = (r & 0b10000000) >> 7;
+        r <<= 1;
+        self.set_r8(reg, r)?;
+
+        self.rf.f.set(Flags::Z, r == 0);
+        self.rf.f.remove(Flags::N);
+        self.rf.f.remove(Flags::H);
+        self.rf.f.set(Flags::C, r7 == 1);
+
         Ok(2)
     }
 
