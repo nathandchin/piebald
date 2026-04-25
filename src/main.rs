@@ -133,7 +133,9 @@ struct IoRegisters {
     interrupts_enabled: bool,
     ie: u8,
 
-    cycles_since_div_inc: usize,
+    counter: usize,
+    last_div: usize,
+    last_tima: usize,
 }
 
 impl IoRegisters {
@@ -142,7 +144,9 @@ impl IoRegisters {
             dat: [0; IOREG_SIZE],
             interrupts_enabled: true,
             ie: 0,
-            cycles_since_div_inc: 0,
+            counter: 0,
+            last_div: 0,
+            last_tima: 0,
         }
     }
 
@@ -154,21 +158,51 @@ impl IoRegisters {
         self.dat[reg as usize - IOREG_START_ADDRESS] = val;
     }
 
-    /// Check current DIV value against cycles_since_div_inc and adjust both as
-    /// appropriate. Handles cases where cycles_since_div_inc is several times
-    /// greater than DIV.
+    /// Check current DIV and TIMA values against clock counter and adjust all as
+    /// appropriate. Handles cases where counter is several times greater than
+    /// DIV.
     fn handle_timer_inc(&mut self) {
         const CPU_CLOCK_HZ: usize = 2usize.pow(22);
         const DIV_TIMER_HZ: usize = 2usize.pow(14);
         const M_CYCLES_PER_DIV_INC: usize = CPU_CLOCK_HZ / DIV_TIMER_HZ / DOTS_PER_M_CYCLE;
 
-        if self.cycles_since_div_inc > M_CYCLES_PER_DIV_INC {
-            for _ in 0..self.cycles_since_div_inc / M_CYCLES_PER_DIV_INC {
+        if self.counter > M_CYCLES_PER_DIV_INC {
+            for _ in 0..(self.counter - self.last_div) / M_CYCLES_PER_DIV_INC {
                 self.set_reg(
                     IoRegisterOffset::DIV,
                     self.get_reg(IoRegisterOffset::DIV).wrapping_add(1),
                 );
-                self.cycles_since_div_inc -= M_CYCLES_PER_DIV_INC;
+                self.last_div = self.counter;
+            }
+        }
+
+        let tac = self.get_reg(IoRegisterOffset::TAC);
+        // https://gbdev.io/pandocs/Timer_and_Divider_Registers.html#ff07--tac-timer-control
+        let m_cycles_per_timer_inc = match tac & 0b00000011 {
+            0 => 256,
+            1 => 4,
+            2 => 16,
+            3 => 64,
+            _ => unreachable!(),
+        };
+
+        if tac & 0b00000100 == 0b00000100 && self.counter > m_cycles_per_timer_inc {
+            for _ in 0..(self.counter - self.last_tima) / m_cycles_per_timer_inc {
+                let (mut new_tima, overflowed) =
+                    self.get_reg(IoRegisterOffset::TIMA).overflowing_add(1);
+
+                // If TIMA overflowed, set it back to TMA and request the timer
+                // interrupt
+                if overflowed {
+                    new_tima = self.get_reg(IoRegisterOffset::TMA);
+                    self.set_reg(
+                        IoRegisterOffset::IF,
+                        self.get_reg(IoRegisterOffset::IF) & INTERRUPT_MASK_TIMER,
+                    );
+                }
+
+                self.set_reg(IoRegisterOffset::TIMA, new_tima);
+                self.last_tima = self.counter;
             }
         }
     }
@@ -242,6 +276,12 @@ const IOREG_SIZE: usize = 0x78;
 const DOTS_PER_FRAME: usize = 70224;
 const DOTS_PER_M_CYCLE: usize = 4;
 const M_CYCLES_PER_SCANLINE: usize = DOTS_PER_FRAME / SCANLINES_PER_FRAME / DOTS_PER_M_CYCLE;
+
+const INTERRUPT_MASK_VBLANK: u8 = 0b00000001;
+const INTERRUPT_MASK_LCD: u8 = 0b00000010;
+const INTERRUPT_MASK_TIMER: u8 = 0b00000100;
+const INTERRUPT_MASK_SERIAL: u8 = 0b00001000;
+const INTERRUPT_MASK_JOYPAD: u8 = 0b00010000;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -704,12 +744,6 @@ impl<'rom> SimpleDmg<'rom> {
     /// Only VBlank and LCD interrupts are updates here, the others are just
     /// checked for.
     fn handle_interrupts(&mut self, dot: usize) -> Result<usize> {
-        const INTERRUPT_MASK_VBLANK: u8 = 0b00000001;
-        const INTERRUPT_MASK_LCD: u8 = 0b00000010;
-        const INTERRUPT_MASK_TIMER: u8 = 0b00000100;
-        const INTERRUPT_MASK_SERIAL: u8 = 0b00001000;
-        const INTERRUPT_MASK_JOYPAD: u8 = 0b00010000;
-
         // Check for VBlank interrupt. Checked outside the loop because it
         // happens only upon first entering the VBlank period
         if self.ioreg.get_reg(IoRegisterOffset::LY) == 144 {
@@ -791,7 +825,11 @@ impl<'rom> SimpleDmg<'rom> {
             ($e:expr) => {{
                 let c = $e;
                 cycles += c;
-                self.ioreg.cycles_since_div_inc += c;
+                self.ioreg.counter = self
+                    .ioreg
+                    .counter
+                    .checked_add(c)
+                    .ok_or_else(|| eyre!("Overflow: TODO"))?;
                 if cycles >= M_CYCLES_PER_SCANLINE {
                     break;
                 }
