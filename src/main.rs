@@ -230,6 +230,12 @@ impl Gameboy<'_> {
 }
 
 #[derive(Debug)]
+struct OamDmaState {
+    src_addr: u8,
+    remaining: usize,
+}
+
+#[derive(Debug)]
 struct SimpleDmg<'rom> {
     rf: RegisterFile,
     vram: Vec<u8>,
@@ -239,7 +245,7 @@ struct SimpleDmg<'rom> {
     wom: Vec<u8>, // WOM :)
     boot_rom: &'rom [u8],
     ioreg: IoRegisters,
-    oam_dma_triggered: Option<u8>,
+    oam_dma_triggered: Option<OamDmaState>,
 }
 
 const VRAM_START_ADDRESS: usize = 0x8000;
@@ -674,7 +680,12 @@ impl<'rom> SimpleDmg<'rom> {
                 if let Some(reg) = IoRegisterOffset::from_repr(address) {
                     debug!("Write {data:#x} to IO register at {address:#x}");
                     match reg {
-                        IoRegisterOffset::OAM => self.oam_dma_triggered = Some(data),
+                        IoRegisterOffset::OAM => {
+                            self.oam_dma_triggered = Some(OamDmaState {
+                                src_addr: data,
+                                remaining: OAM_SIZE,
+                            })
+                        }
                         _ => self.ioreg.set_reg(reg, data),
                     }
                     Ok(())
@@ -705,19 +716,32 @@ impl<'rom> SimpleDmg<'rom> {
     /// See https://gbdev.io/pandocs/Accessing_VRAM_and_OAM.html.
     /// TODO: Access times
     /// TODO: OAM corruption
-    fn handle_oam_dma_transfer(&mut self) -> Result<usize> {
-        if let Some(src) = self.oam_dma_triggered {
-            self.oam_dma_triggered = None;
-
+    fn handle_oam_dma_transfer(&mut self, scanline_cycles_remaining: usize) -> Result<usize> {
+        if let Some(OamDmaState {
+            src_addr: src,
+            remaining: rem,
+        }) = self.oam_dma_triggered
+        {
+            // src is only the high byte, so shift up to get the actual source
             let src = u16::from(src) << 8;
 
+            let n = u16::try_from(rem.saturating_sub(scanline_cycles_remaining))?;
+
             // TODO: optimize with direct memcpy
-            for (offset, addr) in (src..src + OAM_SIZE as u16).enumerate() {
+            for (offset, addr) in (src..src + n).enumerate() {
                 self.write(u16::try_from(OAM_START_ADDRESS + offset)?, self.read(addr)?)?;
             }
 
-            // Always 160 M-cycles
-            Ok(160)
+            if n == 0 {
+                self.oam_dma_triggered = None;
+            } else {
+                self.oam_dma_triggered = Some(OamDmaState {
+                    src_addr: (src + n).to_be_bytes()[0],
+                    remaining: usize::from(n),
+                });
+            }
+
+            Ok(usize::from(n))
         } else {
             Ok(0)
         }
@@ -823,7 +847,7 @@ impl<'rom> SimpleDmg<'rom> {
         loop {
             self.ioreg.handle_timer_inc();
             check_cycles!(self.handle_interrupts(cycles * DOTS_PER_M_CYCLE)?);
-            check_cycles!(self.handle_oam_dma_transfer()?);
+            check_cycles!(self.handle_oam_dma_transfer(M_CYCLES_PER_SCANLINE - cycles)?);
 
             // Get next opcode
             let mut cb_prefixed = false;
