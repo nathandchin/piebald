@@ -585,7 +585,7 @@ impl<'rom> SimpleDmg<'rom> {
                 res.ok_or_else(|| eyre!("Error reading from RAM at address {address:#x}"))
             }
             // Interrupt Enable register (IE)
-            0xFFFF => todo!(),
+            0xFFFF => Ok(self.ioreg.ie),
         }
     }
 
@@ -889,7 +889,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xd0-0xdf
         Some(Self::ret_cond), Some(Self::pop_r16stk), Some(Self::jp_cond_imm16), None, None, Some(Self::push_r16stk), None, Some(Self::rst_tgt3), Some(Self::ret_cond), Some(Self::reti), Some(Self::jp_cond_imm16), None, None, None, None, Some(Self::rst_tgt3),
         // 0xe0-0xef
-        Some(Self::ldh_imm8mem_a), Some(Self::pop_r16stk), Some(Self::ldh_cmem_a), None, None, Some(Self::push_r16stk), Some(Self::and_a_imm8), Some(Self::rst_tgt3), None, None, Some(Self::ld_imm16mem_a), None, None, None, None, Some(Self::rst_tgt3),
+        Some(Self::ldh_imm8mem_a), Some(Self::pop_r16stk), Some(Self::ldh_cmem_a), None, None, Some(Self::push_r16stk), Some(Self::and_a_imm8), Some(Self::rst_tgt3), None, Some(Self::jp_hl), Some(Self::ld_imm16mem_a), None, None, None, None, Some(Self::rst_tgt3),
         // 0xf0-0xff
         Some(Self::ldh_a_imm8mem), Some(Self::pop_r16stk), None, Some(Self::di), None, Some(Self::push_r16stk), None, Some(Self::rst_tgt3), None, None, Some(Self::ld_a_imm16mem), Some(Self::ei), None, None, Some(Self::cp_a_imm8), Some(Self::rst_tgt3),
     ];
@@ -913,13 +913,13 @@ impl<'rom> SimpleDmg<'rom> {
         // 0x70-0x7f
         Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8), Some(Self::bit_b3_r8),
         // 0x80-0x8f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3),
         // 0x90-0x9f
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3),
         // 0xa0-0xaf
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3),
         // 0xb0-0xbf
-        None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3), Some(Self::res_b3_r3),
         // 0xc0-0xcf
         None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         // 0xd0-0xdf
@@ -1380,6 +1380,12 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(4)
     }
 
+    fn jp_hl(&mut self, _opcode: u8) -> Result<usize> {
+        let hl = self.get_r16(2); // 2 = HL
+        self.rf.pc = hl;
+        Ok(1)
+    }
+
     fn call_imm16(&mut self, _opcode: u8) -> Result<usize> {
         let nn = self.consume_16bit_direct()?;
         trace!("CALL {nn:#x}");
@@ -1550,6 +1556,17 @@ impl<'rom> SimpleDmg<'rom> {
 
         self.rf.f.remove(Flags::N);
         self.rf.f.insert(Flags::H);
+        Ok(2)
+    }
+
+    fn res_b3_r3(&mut self, opcode: u8) -> Result<usize> {
+        let bit = opcode << 2 >> 5;
+        let reg = opcode & !0xf8;
+        trace!("RES {bit},{}", Self::get_r8_name(reg));
+
+        let r = self.get_r8(reg)?;
+        self.set_r8(reg, r & !(1 << bit))?;
+
         Ok(2)
     }
 
