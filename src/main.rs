@@ -160,12 +160,14 @@ struct IoRegisters {
 
 impl IoRegisters {
     fn new() -> Self {
-        Self {
+        let mut res = Self {
             dat: [0; IOREG_SIZE],
             interrupts_enabled: true,
             ie: 0,
             cycles_since_div_inc: 0,
-        }
+        };
+        res.set_reg(IoRegisterOffset::JOYP, 0xf);
+        res
     }
 
     fn get_reg(&self, reg: IoRegisterOffset) -> u8 {
@@ -680,6 +682,7 @@ impl<'rom> SimpleDmg<'rom> {
                 if let Some(reg) = IoRegisterOffset::from_repr(address) {
                     debug!("Write {data:#x} to IO register at {address:#x}");
                     match reg {
+                        IoRegisterOffset::JOYP => (), // TODO: implement joypad input
                         IoRegisterOffset::OAM => {
                             self.oam_dma_triggered = Some(OamDmaState {
                                 src_addr: data,
@@ -1000,7 +1003,7 @@ impl<'rom> SimpleDmg<'rom> {
     fn add_hl_r16(&mut self, opcode: u8) -> Result<usize> {
         const HL_REG: u8 = 2;
         let reg = (opcode & 0b00110000) >> 4;
-        trace!("ADD A,{}", Self::get_r16_name(reg));
+        trace!("ADD HL,{}", Self::get_r16_name(reg));
 
         let lhs = self.get_r16(HL_REG);
         let rhs = self.get_r16(reg);
@@ -1108,11 +1111,11 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn jr_cond_imm8(&mut self, opcode: u8) -> Result<usize> {
-        let reg = opcode & !0x20;
+        let c = (opcode & 0b00011000) >> 3;
         let e = self.read_pc_inc()?.cast_signed();
         trace!(
             "JR {},{e:#x}",
-            match (reg) >> 3 {
+            match c {
                 0 => "NZ",
                 1 => "Z",
                 2 => "NC",
@@ -1121,7 +1124,7 @@ impl<'rom> SimpleDmg<'rom> {
             }
         );
 
-        let cond = match (reg) >> 3 {
+        let cond = match c {
             0 => !self.rf.f.contains(Flags::Z),
             1 => self.rf.f.contains(Flags::Z),
             2 => !self.rf.f.contains(Flags::C),
@@ -1312,11 +1315,11 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn ret_cond(&mut self, opcode: u8) -> Result<usize> {
-        let reg = (opcode & 0b00011000) >> 3;
+        let c = (opcode & 0b00011000) >> 3;
 
         trace!(
             "RET {}",
-            match (reg) >> 3 {
+            match c {
                 0 => "NZ",
                 1 => "Z",
                 2 => "NC",
@@ -1325,7 +1328,7 @@ impl<'rom> SimpleDmg<'rom> {
             }
         );
 
-        let cond = match (reg) >> 3 {
+        let cond = match c {
             0 => !self.rf.f.contains(Flags::Z),
             1 => self.rf.f.contains(Flags::Z),
             2 => !self.rf.f.contains(Flags::C),
@@ -1357,6 +1360,7 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn reti(&mut self, _opcode: u8) -> Result<usize> {
+        trace!("RETI");
         let nn_lsb = self.read(self.rf.sp)?;
         self.rf.sp = self.rf.sp.wrapping_add(1);
         let nn_msb = self.read(self.rf.sp)?;
@@ -1368,11 +1372,11 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn jp_cond_imm16(&mut self, opcode: u8) -> Result<usize> {
-        let reg = (opcode & 0b00011000) >> 3;
+        let c = (opcode & 0b00011000) >> 3;
         let nn = self.consume_16bit_direct()?;
         trace!(
             "JP {},{nn:#x}",
-            match (reg) >> 3 {
+            match c {
                 0 => "NZ",
                 1 => "Z",
                 2 => "NC",
@@ -1381,7 +1385,7 @@ impl<'rom> SimpleDmg<'rom> {
             }
         );
 
-        let cond = match (reg) >> 3 {
+        let cond = match c {
             0 => !self.rf.f.contains(Flags::Z),
             1 => self.rf.f.contains(Flags::Z),
             2 => !self.rf.f.contains(Flags::C),
@@ -1405,6 +1409,7 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn jp_hl(&mut self, _opcode: u8) -> Result<usize> {
+        trace!("JP HL");
         let hl = self.get_r16(2); // 2 = HL
         self.rf.pc = hl;
         Ok(1)

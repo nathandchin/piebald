@@ -77,11 +77,19 @@ impl Renderer {
     }
 
     fn draw(&mut self, frame: usize, pixels: &[u8], ioreg: &IoRegisters) -> Result<()> {
+        let lcd_on = ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 7) == (1 << 7);
         let scy = ioreg.get_reg(IoRegisterOffset::SCY);
         let scx = ioreg.get_reg(IoRegisterOffset::SCX);
 
         let mut d = self.rl.begin_drawing(&self.rt);
-        self.texture.update_texture(pixels)?;
+
+        if lcd_on {
+            self.texture.update_texture(pixels)?;
+        } else {
+            let mut x = pixels.to_owned();
+            x.fill(0xff);
+            self.texture.update_texture(&x)?;
+        }
 
         let source = Rectangle {
             x: scx as f32,
@@ -150,13 +158,13 @@ impl Display {
         vram: &[u8],
         ioreg: &mut IoRegisters,
     ) -> Result<()> {
-        let addressing_mode = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b00010000 == 0b00010000 {
+        let addressing_mode = if ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 4) == (1 << 4) {
             TileMapAddressingMode::Unsigned
         } else {
             TileMapAddressingMode::Signed
         };
 
-        let tile_map = if ioreg.get_reg(IoRegisterOffset::LCDC) & 0b01000000 == 0b01000000 {
+        let tile_map = if ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 3) == (1 << 3) {
             &vram[VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS
                 ..VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP2_SIZE]
         } else {
@@ -225,16 +233,18 @@ impl Tile {
         tile_type: TileIdType,
         mode: TileMapAddressingMode,
     ) -> Result<Self> {
-        let start = if matches!(tile_type, TileIdType::BackgroundWindow)
-            && matches!(mode, TileMapAddressingMode::Signed)
-        {
-            usize::try_from(
-                i16::try_from(0x9000 - VRAM_START_ADDRESS)?
-                    + i16::from(map_index.cast_signed()) * i16::try_from(BYTES_PER_TILE)?,
-            )?
+        let start = (if map_index < 0x80 {
+            if matches!(mode, TileMapAddressingMode::Signed)
+                && matches!(tile_type, TileIdType::BackgroundWindow)
+            {
+                0x9000
+            } else {
+                0x8000
+            }
         } else {
-            (0x8000 - VRAM_START_ADDRESS) + usize::from(map_index) * BYTES_PER_TILE
-        };
+            0x8800
+        } - VRAM_START_ADDRESS)
+            + usize::from(map_index) * BYTES_PER_TILE;
         let mut bytes = [0; BYTES_PER_TILE];
         bytes.copy_from_slice(&memory[start..start + BYTES_PER_TILE]);
 
