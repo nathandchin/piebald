@@ -223,6 +223,13 @@ impl Gameboy<'_> {
                 self.cpu
                     .ioreg
                     .set_reg(IoRegisterOffset::LY, scanline.try_into()?);
+
+                if self.cpu.ioreg.get_reg(IoRegisterOffset::LY) == 144 {
+                    self.cpu.ioreg.set_reg(
+                        IoRegisterOffset::IF,
+                        self.cpu.ioreg.get_reg(IoRegisterOffset::IF) & INTERRUPT_MASK_VBLANK,
+                    );
+                }
             }
 
             self.display.draw(frame, &self.cpu.ioreg)?;
@@ -272,6 +279,12 @@ const IOREG_SIZE: usize = 0x78;
 const DOTS_PER_FRAME: usize = 70224;
 const DOTS_PER_M_CYCLE: usize = 4;
 const M_CYCLES_PER_SCANLINE: usize = DOTS_PER_FRAME / SCANLINES_PER_FRAME / DOTS_PER_M_CYCLE;
+
+const INTERRUPT_MASK_VBLANK: u8 = 0b00000001;
+const INTERRUPT_MASK_LCD: u8 = 0b00000010;
+const INTERRUPT_MASK_TIMER: u8 = 0b00000100;
+const INTERRUPT_MASK_SERIAL: u8 = 0b00001000;
+const INTERRUPT_MASK_JOYPAD: u8 = 0b00010000;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -750,24 +763,7 @@ impl<'rom> SimpleDmg<'rom> {
         }
     }
 
-    /// Only VBlank and LCD interrupts are updates here, the others are just
-    /// checked for.
     fn handle_interrupts(&mut self, dot: usize) -> Result<usize> {
-        const INTERRUPT_MASK_VBLANK: u8 = 0b00000001;
-        const INTERRUPT_MASK_LCD: u8 = 0b00000010;
-        const INTERRUPT_MASK_TIMER: u8 = 0b00000100;
-        const INTERRUPT_MASK_SERIAL: u8 = 0b00001000;
-        const INTERRUPT_MASK_JOYPAD: u8 = 0b00010000;
-
-        // Check for VBlank interrupt. Checked outside the loop because it
-        // happens only upon first entering the VBlank period
-        if self.ioreg.get_reg(IoRegisterOffset::LY) == 144 {
-            self.ioreg.set_reg(
-                IoRegisterOffset::IF,
-                self.ioreg.get_reg(IoRegisterOffset::IF) & INTERRUPT_MASK_VBLANK,
-            );
-        }
-
         let mut int_flag = self.ioreg.get_reg(IoRegisterOffset::IF);
 
         /* Check STAT/LCD interrupt conditions.
