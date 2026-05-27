@@ -317,7 +317,7 @@ impl<'rom> SimpleDmg<'rom> {
             rf: RegisterFile::default(),
             ram,
             vram: vec![0; VRAM_SIZE],
-            oam: vec![0; VRAM_SIZE],
+            oam: vec![0; OAM_SIZE],
             rom,
             wom: vec![],
             boot_rom,
@@ -687,7 +687,7 @@ impl<'rom> SimpleDmg<'rom> {
                 let actual_addr = usize::from(address) - OAM_START_ADDRESS;
                 debug!("Write {data:#x} to OAM at {address:#x} (={actual_addr:#x})");
                 *self
-                    .ram
+                    .oam
                     .get_mut(actual_addr)
                     .ok_or_eyre(eyre!("Invalid write at address {address:#x}"))? = data;
                 Ok(())
