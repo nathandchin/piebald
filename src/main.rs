@@ -227,7 +227,7 @@ impl Gameboy<'_> {
                 if self.cpu.ioreg.get_reg(IoRegisterOffset::LY) == 144 {
                     self.cpu.ioreg.set_reg(
                         IoRegisterOffset::IF,
-                        self.cpu.ioreg.get_reg(IoRegisterOffset::IF) & INTERRUPT_MASK_VBLANK,
+                        self.cpu.ioreg.get_reg(IoRegisterOffset::IF) | INTERRUPT_MASK_VBLANK,
                     );
                 }
             }
@@ -693,7 +693,7 @@ impl<'rom> SimpleDmg<'rom> {
             // IO Registers
             0xFF00..0xFF78 => {
                 if let Some(reg) = IoRegisterOffset::from_repr(address) {
-                    debug!("Write {data:#x} to IO register at {address:#x}");
+                    debug!("Write {data:#x} to IO register {reg:?} ({address:#x})");
                     match reg {
                         IoRegisterOffset::JOYP => (), // TODO: implement joypad input
                         IoRegisterOffset::OAM => {
@@ -724,6 +724,7 @@ impl<'rom> SimpleDmg<'rom> {
             // Interrupt Enable register (IE)
             0xFFFF => {
                 self.ioreg.ie = data;
+                debug!("Write {data:#x} to IE (=0xffff)");
                 Ok(())
             }
         }
@@ -764,8 +765,6 @@ impl<'rom> SimpleDmg<'rom> {
     }
 
     fn handle_interrupts(&mut self, dot: usize) -> Result<usize> {
-        let mut int_flag = self.ioreg.get_reg(IoRegisterOffset::IF);
-
         /* Check STAT/LCD interrupt conditions.
          * From https://gbdev.io/pandocs/Interrupt_Sources.html:
          * "The various STAT interrupt sources (modes 0-2 and LYC=LY)
@@ -783,7 +782,10 @@ impl<'rom> SimpleDmg<'rom> {
                     // Mode 1
                     || (144 <= ly && dot == 0)
             {
-                int_flag &= INTERRUPT_MASK_LCD;
+                self.ioreg.set_reg(
+                    IoRegisterOffset::IF,
+                    self.ioreg.get_reg(IoRegisterOffset::IF) | INTERRUPT_MASK_LCD,
+                );
             }
         }
 
@@ -797,12 +799,17 @@ impl<'rom> SimpleDmg<'rom> {
                 (INTERRUPT_MASK_SERIAL, 0x58),
                 (INTERRUPT_MASK_JOYPAD, 0x60),
             ] {
-                if int_flag & mask == mask {
+                if self.ioreg.get_reg(IoRegisterOffset::IF) & mask == mask
+                    && self.ioreg.ie & mask == mask
+                {
                     debug!("Service interrupt mask={mask:#x}, handler={handler:#x}");
 
-                    // IME and corresponding bit set to 0 upon servicing
-                    self.ioreg.set_reg(IoRegisterOffset::IF, int_flag & !mask);
+                    // IME and relevant IF bit are reset upon servicing
                     self.ioreg.interrupts_enabled = false;
+                    self.ioreg.set_reg(
+                        IoRegisterOffset::IF,
+                        self.ioreg.get_reg(IoRegisterOffset::IF) & !mask,
+                    );
 
                     // Nearly identical to `call`; we push PC to stack and
                     // set PC to the appropriate handler
@@ -862,18 +869,22 @@ impl<'rom> SimpleDmg<'rom> {
             check_cycles!(if cb_prefixed {
                 match Self::CB_OPCODES[usize::from(opcode)] {
                     Some(f) => f(self, opcode)?,
-                    None => todo!(
-                        "CB-prefixed opcode not yet implemented: {opcode:#x} ({:#x})",
-                        self.rf.pc
-                    ),
+                    None => {
+                        return Err(eyre!(
+                            "CB-prefixed opcode not yet implemented: {opcode:#x} ({:#x})",
+                            self.rf.pc
+                        ));
+                    }
                 }
             } else {
                 match Self::OPCODES[usize::from(opcode)] {
                     Some(f) => f(self, opcode)?,
-                    None => todo!(
-                        "Opcode not yet implemented: {opcode:#x} ({:#x})",
-                        self.rf.pc
-                    ),
+                    None => {
+                        return Err(eyre!(
+                            "Opcode not yet implemented: {opcode:#x} ({:#x})",
+                            self.rf.pc
+                        ));
+                    }
                 }
             });
         }
