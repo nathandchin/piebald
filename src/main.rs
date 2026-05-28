@@ -30,7 +30,11 @@ fn main() -> Result<()> {
         buf
     };
     let dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
-    let display = Display::new(!args.no_graphic)?;
+    let display = if args.no_graphic {
+        None
+    } else {
+        Some(Display::new()?)
+    };
 
     let mut gb = Gameboy { cpu: dmg, display };
 
@@ -205,7 +209,7 @@ impl IoRegisters {
 #[derive(Debug)]
 struct Gameboy<'rom> {
     cpu: SimpleDmg<'rom>,
-    display: Display,
+    display: Option<Display>,
 }
 
 impl Gameboy<'_> {
@@ -221,8 +225,9 @@ impl Gameboy<'_> {
                     )
                 })?;
 
-                self.display
-                    .update_scanline(scanline, &self.cpu.vram, &mut self.cpu.ioreg)?;
+                if let Some(d) = &mut self.display {
+                    d.update_scanline(scanline, &self.cpu.vram, &self.cpu.ioreg);
+                }
 
                 self.cpu
                     .ioreg
@@ -236,7 +241,9 @@ impl Gameboy<'_> {
                 }
             }
 
-            self.display.draw(frame, &self.cpu.ioreg)?;
+            if let Some(d) = &mut self.display {
+                d.draw(frame, &self.cpu.ioreg)?;
+            }
             frame += 1;
         }
     }

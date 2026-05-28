@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use eyre::Result;
 use raylib::prelude::*;
 
@@ -23,16 +25,14 @@ pub const SCALE_FACTOR: f32 = 5.0;
 
 #[derive(Debug)]
 pub struct Display {
-    pixels: [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL],
-    rend: Option<Renderer>,
-}
-
-#[derive(Debug)]
-struct Renderer {
+    background_pixels: PixelBuffer,
+    window_pixels: PixelBuffer,
     rl: RaylibHandle,
     rt: RaylibThread,
     texture: WeakTexture2D,
 }
+
+type PixelBuffer = [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL];
 
 #[allow(unused)]
 #[derive(Clone, Copy, Debug)]
@@ -47,7 +47,13 @@ enum TileMapAddressingMode {
     Signed,
 }
 
-impl Drop for Renderer {
+#[derive(Clone, Copy, Debug)]
+enum GraphicsLayer {
+    Background,
+    Window,
+}
+
+impl Drop for Display {
     fn drop(&mut self) {
         // Not sure about this - investigate more
         unsafe {
@@ -56,8 +62,9 @@ impl Drop for Renderer {
     }
 }
 
-impl Renderer {
-    fn new() -> Result<Self> {
+impl Display {
+    const PALETTE: [u8; 4] = [0xff, 0x6e, 0xb0, 0x00];
+    pub fn new() -> Result<Self> {
         let (mut rl, thread) = raylib::init()
             .size(256 * SCALE_FACTOR as i32, 256 * SCALE_FACTOR as i32)
             .build();
@@ -69,14 +76,16 @@ impl Renderer {
         image.set_format(PIXEL_FORMAT);
         let texture = rl.load_texture_from_image(&thread, &image)?;
         let texture = unsafe { texture.make_weak() };
-        Ok(Renderer {
+        Ok(Self {
             rl,
             rt: thread,
+            background_pixels: [0; _],
+            window_pixels: [0; _],
             texture,
         })
     }
 
-    fn draw(&mut self, frame: usize, pixels: &[u8], ioreg: &IoRegisters) -> Result<()> {
+    pub fn draw(&mut self, frame: usize, ioreg: &IoRegisters) -> Result<()> {
         let lcd_on = ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 7) == (1 << 7);
         let scy = ioreg.get_reg(IoRegisterOffset::SCY);
         let scx = ioreg.get_reg(IoRegisterOffset::SCX);
@@ -84,9 +93,9 @@ impl Renderer {
         let mut d = self.rl.begin_drawing(&self.rt);
 
         if lcd_on {
-            self.texture.update_texture(pixels)?;
+            self.texture.update_texture(&self.background_pixels)?;
         } else {
-            let mut x = pixels.to_owned();
+            let mut x = self.background_pixels.to_owned();
             x.fill(0xff);
             self.texture.update_texture(&x)?;
         }
@@ -127,51 +136,58 @@ impl Renderer {
 
         Ok(())
     }
-}
 
-impl Display {
-    const PALETTE: [u8; 4] = [0xff, 0x6e, 0xb0, 0x00];
+    pub fn update_scanline(&mut self, scanline: usize, vram: &[u8], ioreg: &IoRegisters) {
+        const MAP1_RANGE: Range<usize> = VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS
+            ..VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP1_SIZE;
+        const MAP2_RANGE: Range<usize> = VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS
+            ..VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP2_SIZE;
 
-    pub fn new(do_render: bool) -> Result<Self> {
-        let rend = if do_render {
-            Some(Renderer::new()?)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            pixels: [0; _],
-            rend,
-        })
-    }
-
-    pub fn draw(&mut self, frame: usize, ioreg: &IoRegisters) -> Result<()> {
-        match self.rend.as_mut() {
-            Some(rend) => rend.draw(frame, &self.pixels, ioreg),
-            None => Ok(()),
-        }
-    }
-
-    pub fn update_scanline(
-        &mut self,
-        scanline: usize,
-        vram: &[u8],
-        ioreg: &mut IoRegisters,
-    ) -> Result<()> {
         let addressing_mode = if ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 4) == (1 << 4) {
             TileMapAddressingMode::Unsigned
         } else {
             TileMapAddressingMode::Signed
         };
 
-        let tile_map = if ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 3) == (1 << 3) {
-            &vram[VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS
-                ..VRAM_TILE_MAP2_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP2_SIZE]
-        } else {
-            &vram[VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS
-                ..VRAM_TILE_MAP1_START_ADDRESS - VRAM_START_ADDRESS + VRAM_TILE_MAP1_SIZE]
-        };
+        {
+            let tile_map = if ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 3) == (1 << 3) {
+                &vram[MAP2_RANGE]
+            } else {
+                &vram[MAP1_RANGE]
+            };
+            self.update_scanline_layer(
+                scanline,
+                vram,
+                addressing_mode,
+                tile_map,
+                GraphicsLayer::Background,
+            );
+        }
 
+        {
+            let tile_map = if ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 6) == (1 << 6) {
+                &vram[MAP2_RANGE]
+            } else {
+                &vram[MAP1_RANGE]
+            };
+            self.update_scanline_layer(
+                scanline,
+                vram,
+                addressing_mode,
+                tile_map,
+                GraphicsLayer::Window,
+            );
+        }
+    }
+
+    fn update_scanline_layer(
+        &mut self,
+        scanline: usize,
+        vram: &[u8],
+        addressing_mode: TileMapAddressingMode,
+        tile_map: &[u8],
+        layer: GraphicsLayer,
+    ) {
         // If we're at the end of the frame, then we compute all the non-visible
         // scanlines for ease of understanding. This will change eventually.
         let scanlines = if scanline == PIXELS_PER_VISIBLE_COL {
@@ -212,12 +228,13 @@ impl Display {
 
                         // This is dependent on the chosen PIXEL_FORMAT
                         let idx = (x + y * PIXELS_PER_FULL_SCREEN_ROW) * BYTES_PER_PIXEL;
-                        self.pixels[idx] = color;
+                        match layer {
+                            GraphicsLayer::Background => self.background_pixels[idx] = color,
+                            GraphicsLayer::Window => self.window_pixels[idx] = color,
+                        }
                     }
                 });
         }
-
-        Ok(())
     }
 }
 
