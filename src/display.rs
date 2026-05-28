@@ -250,17 +250,14 @@ impl Tile {
         tile_type: TileIdType,
         mode: TileMapAddressingMode,
     ) -> Result<Self> {
-        let start = (if map_index < 0x80 {
-            if matches!(mode, TileMapAddressingMode::Signed)
-                && matches!(tile_type, TileIdType::BackgroundWindow)
-            {
-                0x9000
-            } else {
-                0x8000
-            }
+        // TODO: revisit the 8800 method (signed addressing)
+        let start = if matches!(mode, TileMapAddressingMode::Signed)
+            && matches!(tile_type, TileIdType::BackgroundWindow)
+        {
+            0x9000
         } else {
-            0x8800
-        } - VRAM_START_ADDRESS)
+            0x8000
+        } - VRAM_START_ADDRESS
             + usize::from(map_index) * BYTES_PER_TILE;
         let mut bytes = [0; BYTES_PER_TILE];
         bytes.copy_from_slice(&memory[start..start + BYTES_PER_TILE]);
