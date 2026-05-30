@@ -33,6 +33,7 @@ pub struct Display {
 }
 
 type PixelBuffer = [u8; PIXELS_PER_FULL_SCREEN_ROW * PIXELS_PER_FULL_SCREEN_COL * BYTES_PER_PIXEL];
+type LayerOffset = (u8, u8);
 
 #[allow(unused)]
 #[derive(Clone, Copy, Debug)]
@@ -87,8 +88,6 @@ impl Display {
 
     pub fn draw(&mut self, frame: usize, ioreg: &IoRegisters) -> Result<()> {
         let lcd_on = ioreg.get_reg(IoRegisterOffset::LCDC) & (1 << 7) == (1 << 7);
-        let scy = ioreg.get_reg(IoRegisterOffset::SCY);
-        let scx = ioreg.get_reg(IoRegisterOffset::SCX);
 
         let mut d = self.rl.begin_drawing(&self.rt);
 
@@ -100,25 +99,11 @@ impl Display {
             self.texture.update_texture(&x)?;
         }
 
-        let source = Rectangle {
-            x: scx as f32,
-            y: scy as f32,
-            width: PIXELS_PER_FULL_SCREEN_ROW as f32,
-            height: PIXELS_PER_FULL_SCREEN_COL as f32,
-        };
-        let dest = Rectangle {
-            x: 0.0,
-            y: 0.0,
-            width: PIXELS_PER_FULL_SCREEN_ROW as f32 * SCALE_FACTOR,
-            height: PIXELS_PER_FULL_SCREEN_COL as f32 * SCALE_FACTOR,
-        };
-
-        d.draw_texture_pro(
+        d.draw_texture_ex(
             &self.texture,
-            source,
-            dest,
-            Vector2::zero(), // Not used because we're not doing rotation
+            Vector2::zero(),
             0.0,
+            SCALE_FACTOR,
             Color::WHITE,
         );
 
@@ -155,11 +140,20 @@ impl Display {
             } else {
                 &vram[MAP1_RANGE]
             };
+            let offset: LayerOffset = (
+                ioreg.get_reg(IoRegisterOffset::SCX),
+                ioreg.get_reg(IoRegisterOffset::SCY),
+            );
+            if offset.0 != 0 {
+                todo!("BG scrolling with SCX");
+            }
+
             self.update_scanline_layer(
                 scanline,
                 vram,
                 addressing_mode,
                 tile_map,
+                offset,
                 GraphicsLayer::Background,
             );
         }
@@ -170,11 +164,20 @@ impl Display {
             } else {
                 &vram[MAP1_RANGE]
             };
+            let offset: LayerOffset = (
+                ioreg.get_reg(IoRegisterOffset::WX),
+                ioreg.get_reg(IoRegisterOffset::WY),
+            );
+            if offset != (0, 0) {
+                todo!("Window scrolling wtih WX and WY");
+            }
+
             self.update_scanline_layer(
                 scanline,
                 vram,
                 addressing_mode,
                 tile_map,
+                offset,
                 GraphicsLayer::Window,
             );
         }
@@ -186,6 +189,7 @@ impl Display {
         vram: &[u8],
         addressing_mode: TileMapAddressingMode,
         tile_map: &[u8],
+        offset: (u8, u8),
         layer: GraphicsLayer,
     ) {
         // If we're at the end of the frame, then we compute all the non-visible
@@ -217,13 +221,14 @@ impl Display {
                 })
                 .enumerate()
                 .for_each(|(tile_idx, tile)| {
-                    let y = scanline + ((tile_idx / TILES_PER_ROW) * PIXELS_PER_TILE);
+                    let y = ((scanline).wrapping_sub(usize::from(offset.1)))
+                        % PIXELS_PER_FULL_SCREEN_COL;
                     for (pixel_idx, &pixel) in tile
                         .get_line_pixels(scanline % PIXELS_PER_TILE)
                         .iter()
                         .enumerate()
                     {
-                        let x = pixel_idx + ((tile_idx % TILES_PER_ROW) * PIXELS_PER_TILE);
+                        let x = pixel_idx + (tile_idx * PIXELS_PER_TILE);
                         let color = Self::PALETTE[usize::from(pixel)];
 
                         // This is dependent on the chosen PIXEL_FORMAT
