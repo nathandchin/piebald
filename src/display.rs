@@ -117,6 +117,8 @@ impl Display {
 
         if cfg!(debug_assertions) {
             d.draw_text(&format!("Frame: {frame}"), 10, 10, 20, Color::RED);
+            let fps = 1.0 / d.get_frame_time();
+            d.draw_text(&format!("{fps:.1} FPS"), 10, 35, 20, Color::RED);
         }
 
         Ok(())

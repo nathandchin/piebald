@@ -2,7 +2,11 @@ mod display;
 
 use display::{Display, SCANLINES_PER_FRAME};
 
-use std::{fs::File, io::Read};
+use std::{
+    fs::File,
+    io::Read,
+    time::{Duration, Instant},
+};
 
 use bitflags::bitflags;
 use clap::Parser;
@@ -12,11 +16,18 @@ use strum_macros::FromRepr;
 
 #[derive(Parser, Debug)]
 struct Args {
+    /// Path to boot ROM
     boot_rom: String,
+    /// Path to game ROM
     rom: String,
 
+    /// Run without graphics, emulating CPU not not PPU
     #[arg(short = 'n', long, default_value_t = false)]
     no_graphic: bool,
+
+    /// Disable frame limiting and run as fast as possible
+    #[arg(short = 'w', long, default_value_t = false)]
+    warp: bool,
 }
 
 fn main() -> Result<()> {
@@ -38,7 +49,7 @@ fn main() -> Result<()> {
 
     let mut gb = Gameboy { cpu: dmg, display };
 
-    gb.run()
+    gb.run(!args.warp)
 }
 
 #[allow(unused)]
@@ -213,10 +224,13 @@ struct Gameboy<'rom> {
 }
 
 impl Gameboy<'_> {
-    fn run(&mut self) -> Result<()> {
+    fn run(&mut self, do_frame_limiting: bool) -> Result<()> {
         let mut frame = 0;
 
         loop {
+            // Don't use raylib's `get_frame_time` because we may not have a display
+            let frame_start = Instant::now();
+
             for scanline in 0..SCANLINES_PER_FRAME {
                 let _executed_cycles = self.cpu.execute_scanline().wrap_err_with(|| {
                     format!(
@@ -245,6 +259,11 @@ impl Gameboy<'_> {
                 d.draw(frame, &self.cpu.ioreg)?;
             }
             frame += 1;
+
+            let elapsed = Instant::now().duration_since(frame_start);
+            if do_frame_limiting && elapsed < FRAME_DURATION {
+                std::thread::sleep(FRAME_DURATION - elapsed);
+            }
         }
     }
 }
@@ -296,6 +315,9 @@ const INTERRUPT_MASK_LCD: u8 = 0b00000010;
 const INTERRUPT_MASK_TIMER: u8 = 0b00000100;
 const INTERRUPT_MASK_SERIAL: u8 = 0b00001000;
 const INTERRUPT_MASK_JOYPAD: u8 = 0b00010000;
+
+// Source: https://gbdev.io/pandocs/Rendering.html
+const FRAME_DURATION: Duration = Duration::from_micros(16470);
 
 bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
