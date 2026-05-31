@@ -4,7 +4,7 @@ use display::{Display, SCANLINES_PER_FRAME};
 
 use std::{
     fs::File,
-    io::Read,
+    io::{Read, Write},
     time::{Duration, Instant},
 };
 
@@ -28,6 +28,10 @@ struct Args {
     /// Disable frame limiting and run as fast as possible
     #[arg(short = 'w', long, default_value_t = false)]
     warp: bool,
+
+    /// File to write serial data to
+    #[arg(long)]
+    serial: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -40,7 +44,14 @@ fn main() -> Result<()> {
         File::open(&args.rom)?.read_to_end(&mut buf)?;
         buf
     };
-    let dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom);
+
+    let serial = args
+        .serial
+        .map(File::create)
+        .transpose()
+        .wrap_err("Could not open serial file")?;
+
+    let dmg = SimpleDmg::new_with_bootrom(&boot_rom, &rom, serial);
     let display = if args.no_graphic {
         None
     } else {
@@ -285,6 +296,7 @@ struct SimpleDmg<'rom> {
     boot_rom: &'rom [u8],
     ioreg: IoRegisters,
     oam_dma_triggered: Option<OamDmaState>,
+    serial: Option<File>,
 }
 
 const VRAM_START_ADDRESS: usize = 0x8000;
@@ -339,7 +351,7 @@ bitflags! {
 type OpcodeFn<'rom> = fn(&mut SimpleDmg<'rom>, opcode: u8) -> Result<usize, eyre::ErrReport>;
 
 impl<'rom> SimpleDmg<'rom> {
-    pub fn new_with_bootrom(boot_rom: &'rom [u8], rom: &'rom [u8]) -> Self {
+    pub fn new_with_bootrom(boot_rom: &'rom [u8], rom: &'rom [u8], serial: Option<File>) -> Self {
         let ram = vec![0; WRAM_SIZE + HRAM_SIZE];
 
         Self {
@@ -352,6 +364,7 @@ impl<'rom> SimpleDmg<'rom> {
             boot_rom,
             ioreg: IoRegisters::new(),
             oam_dma_triggered: None,
+            serial,
         }
     }
 
@@ -738,6 +751,13 @@ impl<'rom> SimpleDmg<'rom> {
                                 src_addr: data,
                                 remaining: OAM_SIZE,
                             })
+                        }
+                        IoRegisterOffset::SB => {
+                            self.serial
+                                .as_mut()
+                                .map(|f| f.write(&[data]))
+                                .transpose()
+                                .wrap_err("Could not write data to serial file")?;
                         }
                         _ => self.ioreg.set_reg(reg, data),
                     }
