@@ -477,7 +477,8 @@ impl<'rom> SimpleDmg<'rom> {
             }
             3 => {
                 self.rf.a = msb;
-                self.rf.f = Flags::from_bits_retain(lsb);
+                // Only the top four bits can be set, others must remain 0
+                self.rf.f = Flags::from_bits_retain(lsb & 0xf0);
             }
             _ => unreachable!("Invalid R16stk identifier: {r}"),
         };
@@ -982,7 +983,7 @@ impl<'rom> SimpleDmg<'rom> {
         // 0xe0-0xef
         Some(Self::ldh_imm8mem_a), Some(Self::pop_r16stk), Some(Self::ldh_cmem_a), None, None, Some(Self::push_r16stk), Some(Self::and_a_imm8), Some(Self::rst_tgt3), Some(Self::add_sp_imm8), Some(Self::jp_hl), Some(Self::ld_imm16mem_a), None, None, None, Some(Self::xor_a_imm8), Some(Self::rst_tgt3),
         // 0xf0-0xff
-        Some(Self::ldh_a_imm8mem), Some(Self::pop_r16stk), None, Some(Self::di), None, Some(Self::push_r16stk), Some(Self::or_a_imm8), Some(Self::rst_tgt3), Some(Self::ld_hl_spimm8), Some(Self::ld_hl_sp), Some(Self::ld_a_imm16mem), Some(Self::ei), None, None, Some(Self::cp_a_imm8), Some(Self::rst_tgt3),
+        Some(Self::ldh_a_imm8mem), Some(Self::pop_r16stk), None, Some(Self::di), None, Some(Self::push_r16stk), Some(Self::or_a_imm8), Some(Self::rst_tgt3), Some(Self::ld_hl_spimm8), Some(Self::ld_sp_hl), Some(Self::ld_a_imm16mem), Some(Self::ei), None, None, Some(Self::cp_a_imm8), Some(Self::rst_tgt3),
     ];
 
     #[rustfmt::skip]
@@ -1716,7 +1717,7 @@ impl<'rom> SimpleDmg<'rom> {
         Ok(3)
     }
 
-    fn ld_hl_sp(&mut self, _opcode: u8) -> Result<usize> {
+    fn ld_sp_hl(&mut self, _opcode: u8) -> Result<usize> {
         self.rf.sp = self.get_r16(2); // 2 = HL
         Ok(2)
     }
