@@ -9,7 +9,7 @@ clap = { version = "4.5.60", features = ["derive"] }
 env_logger = "0.11.9"
 eyre = "0.6.12"
 log = "0.4.29"
-raylib = "5.5.1"
+raylib = { version = "6.0.0", features = ["wayland", "GLFW_BUILD_WAYLAND", "SUPPORT_IMAGE_GENERATION"] }
 strum_macros = "0.28.0"
 
 [profile.dev]
