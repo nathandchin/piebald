@@ -21,7 +21,7 @@ const TILES_PER_ROW: usize = PIXELS_PER_FULL_SCREEN_COL / PIXELS_PER_TILE;
 // Specific to this implementation
 const PIXEL_FORMAT: PixelFormat = PixelFormat::PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
 const BYTES_PER_PIXEL: usize = 1;
-pub const SCALE_FACTOR: f32 = 5.0;
+pub const SCALE_FACTOR: f32 = 3.0;
 
 #[derive(Debug)]
 pub struct Display {
@@ -67,7 +67,11 @@ impl Display {
     const PALETTE: [u8; 4] = [0xff, 0x6e, 0xb0, 0x00];
     pub fn new() -> Result<Self> {
         let (mut rl, thread) = raylib::init()
-            .size(256 * SCALE_FACTOR as i32, 256 * SCALE_FACTOR as i32)
+            .size(
+                i32::try_from(PIXELS_PER_FULL_SCREEN_COL)? * SCALE_FACTOR as i32,
+                i32::try_from(PIXELS_PER_FULL_SCREEN_ROW)? * SCALE_FACTOR as i32,
+            )
+            .highdpi()
             .build();
         let mut image = Image::gen_image_color(
             PIXELS_PER_FULL_SCREEN_COL as i32,
